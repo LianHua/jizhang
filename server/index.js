@@ -103,6 +103,12 @@ setTimeout(function scheduleDaily() {
 // ---------- API ----------
 app.get("/api/health", (req, res) => res.json({ ok: true, time: new Date().toISOString() }));
 app.get("/api/meta", (req, res) => res.json({ name: "记账本", version: APP_VERSION }));
+// 写操作审计（响应后异步记录）。必须在业务路由【之前】挂载：
+// Express 按注册顺序匹配，若挂在业务路由之后，POST/PUT/DELETE 早已被
+// 前面的路由终结响应，永远走不到本中间件 → op_logs 空。
+// bookId/userId 由业务路由内的 auth/requireBook 在响应完成前设置，
+// res.on('finish') 回调执行时读取即为最终值。
+app.use("/api", logOp);
 app.use("/api/auth", authRoutes);
 app.use("/api/books", bookRoutes);
 app.use("/api/categories", categoryRoutes);
@@ -120,8 +126,6 @@ app.use("/api/savings", savingsRoutes);
 app.use("/api/wallets", walletRoutes);
 app.use("/api/sync", syncRoutes);
 app.use("/api/merchants", merchantRoutes);
-// 写操作审计（响应后记录），挂所有 API 路由之后
-app.use("/api", logOp);
 app.use("/api/oplogs", oplogRoutes);
 
 // ---------- 静态前端 ----------

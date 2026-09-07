@@ -1,17 +1,20 @@
 import { Router } from "express";
 import { db } from "./db.js";
-import { auth, wrap } from "./mw.js";
+import { auth, requireBook, wrap } from "./mw.js";
 
 // 从路径推断实体与 id：/flows/123 → { entity:'flows', id:123 }
 const PATH_RE = /^\/([a-z_]+)\/?(\d+)?/;
 
-// 写操作审计中间件：挂在所有 /api 路由之后，响应完成后异步记录。
-// 零侵入——不需要在业务路由里手动埋点；审计失败不影响业务。
+// 写操作审计中间件：必须挂在所有业务 API 路由【之前】注册 finish 监听，
+// 响应完成后异步记录（此刻 req.bookId/userId 已被业务路由的
+// auth/requireBook 填好）。零侵入——不需要在业务路由里手动埋点；
+// 审计失败不影响业务；未登录请求（如 /auth/login）不记录。
 export function logOp(req, res, next) {
   const m = req.method;
   if (m !== "POST" && m !== "PUT" && m !== "DELETE") return next();
   res.on("finish", () => {
     try {
+      if (!req.user) return; // 只记已登录用户的写操作
       const mm = PATH_RE.exec(req.path || "");
       const entity = mm ? mm[1] : "";
       const entityId = mm && mm[2] ? Number(mm[2]) : null;
@@ -41,6 +44,8 @@ export function logOp(req, res, next) {
 
 const r = Router();
 r.use(auth);
+// 查询按当前账本过滤：客户端（网页 api.js / 安卓 Dio 拦截器）会自动附带 ?bookId=
+r.use(requireBook);
 
 // 当前账本最近操作日志（网页端 / 安卓端排查、失败重试定位用）
 r.get(
