@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import dayjs from "dayjs";
 import api from "../api.js";
 import { useStore } from "../store.js";
@@ -10,6 +10,18 @@ import PeriodSwitcher from "../components/PeriodSwitcher.vue";
 import SearchFlowsDialog from "../components/SearchFlowsDialog.vue";
 
 const store = useStore();
+
+// v2.2.0：统计页顶部吸顶偏移 = 顶栏高度（顶栏 sticky 占位，吸顶元素贴其下方）
+const stickTop = ref(60);
+function measureTop() {
+  const tb = document.querySelector(".topbar");
+  if (tb) stickTop.value = Math.round(tb.getBoundingClientRect().height);
+}
+onMounted(() => {
+  measureTop();
+  window.addEventListener("resize", measureTop);
+});
+onBeforeUnmount(() => window.removeEventListener("resize", measureTop));
 
 // 顶部「🔍 搜索流水」弹窗（关键字搜全部 / 按现有月年交互筛范围）
 const searchOpen = ref(false);
@@ -293,34 +305,37 @@ async function onRankClick(name) {
 
 <template>
   <div>
-    <div class="head-row">
-      <h2 class="page-title" style="margin:0">统计分析</h2>
-      <button class="btn btn-primary" @click="searchOpen = true">🔍 搜索流水</button>
-    </div>
+    <!-- v2.2.0：顶部到「月/年选择区」固定（position:sticky 于顶栏下方），滚动图表/明细不划走 -->
+    <div class="stats-sticky" :style="{ top: stickTop + 'px' }">
+      <div class="head-row">
+        <h2 class="page-title" style="margin:0">统计分析</h2>
+        <button class="btn btn-primary" @click="searchOpen = true">🔍 搜索流水</button>
+      </div>
 
-    <!-- 范围 + 类型 快速切换（对齐安卓图表：月/年 + 支出/收入） -->
-    <div class="card range">
-      <div class="seg">
-        <button :class="{on:range==='month'}" @click="range='month';load()">月</button>
-        <button :class="{on:range==='year'}" @click="range='year';load()">年</button>
-        <button :class="{on:range==='custom'}" @click="range='custom'">自定义</button>
+      <!-- 范围 + 类型 快速切换（对齐安卓图表：月/年 + 支出/收入） -->
+      <div class="card range">
+        <div class="seg">
+          <button :class="{on:range==='month'}" @click="range='month';load()">月</button>
+          <button :class="{on:range==='year'}" @click="range='year';load()">年</button>
+          <button :class="{on:range==='custom'}" @click="range='custom'">自定义</button>
+        </div>
+        <div class="seg">
+          <button :class="{on:type==='expense'}" @click="type='expense';load()">支出</button>
+          <button :class="{on:type==='income'}" @click="type='income';load()">收入</button>
+        </div>
+        <template v-if="range==='month'">
+          <PeriodSwitcher mode="month" :model-value="selMonth" @update:model-value="selMonth=$event;load()" />
+        </template>
+        <template v-else-if="range==='year'">
+          <PeriodSwitcher mode="year" :model-value="year" @update:model-value="year=$event;load()" />
+        </template>
+        <template v-else>
+          <DateInput v-model="custom.start" />
+          <span class="muted">至</span>
+          <DateInput v-model="custom.end" />
+          <button class="btn btn-sm btn-primary" @click="load">查询</button>
+        </template>
       </div>
-      <div class="seg">
-        <button :class="{on:type==='expense'}" @click="type='expense';load()">支出</button>
-        <button :class="{on:type==='income'}" @click="type='income';load()">收入</button>
-      </div>
-      <template v-if="range==='month'">
-        <PeriodSwitcher mode="month" :model-value="selMonth" @update:model-value="selMonth=$event;load()" />
-      </template>
-      <template v-else-if="range==='year'">
-        <PeriodSwitcher mode="year" :model-value="year" @update:model-value="year=$event;load()" />
-      </template>
-      <template v-else>
-        <DateInput v-model="custom.start" />
-        <span class="muted">至</span>
-        <DateInput v-model="custom.end" />
-        <button class="btn btn-sm btn-primary" @click="load">查询</button>
-      </template>
     </div>
 
     <!-- 概览 -->
@@ -459,6 +474,16 @@ export default { components: { EChart } };
 </script>
 
 <style scoped>
+/* v2.2.0：顶部（标题+范围/类型+月年选择器）吸顶：负 margin 抵消 Layout .content 的
+   20px 内边距，让吸顶底色贴满整行；滚动后锁定在顶栏下方不划走 */
+.stats-sticky {
+  position: sticky;
+  z-index: 10;
+  background: var(--bg);
+  margin: -20px -20px 0;
+  padding: 20px 20px 16px;
+}
+.stats-sticky .range { margin-bottom: 0; }
 .head-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
 .range { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
 .seg { display: inline-flex; background: var(--surface-2); border-radius: 10px; padding: 4px; }
