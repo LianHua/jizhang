@@ -382,6 +382,52 @@ addColumnIfMissing("savings_history", "manual", "manual INTEGER NOT NULL DEFAULT
 // cat=来源分类；owner=归属人（空=任意）；amount=固定存入金额
 addColumnIfMissing("wallets", "deposit_rules", "deposit_rules TEXT NOT NULL DEFAULT '[]'");
 
+// ---------------- 水电气物业用量（utility） ----------------
+// 规则表：同类型可多段（搬家换城市 / 调价 = 新开一段，带生效起止月）。
+// effective_from 之前与 effective_to 之后的流水不参与生成（用户明确：生效日期前的流水不计入）。
+db.exec(`
+CREATE TABLE IF NOT EXISTS utility_rules (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id       INTEGER NOT NULL,
+  type          TEXT NOT NULL,              -- water | electric | gas | property
+  name          TEXT NOT NULL DEFAULT '',   -- 如「广州水费(2026新价)」
+  effective_from TEXT NOT NULL,             -- 'YYYY-MM' 生效起始（含）
+  effective_to  TEXT,                       -- 'YYYY-MM' 结束（含）；NULL = 至今
+  bill_span     INTEGER NOT NULL DEFAULT 1, -- 每笔覆盖月数：水2 电1 燃气2 物业3
+  cycle_type    TEXT NOT NULL DEFAULT 'by_span', -- by_span按账单周期分档 / by_year按年累计(燃气)
+  unit          TEXT NOT NULL DEFAULT 'm3', -- 展示单位：m3 / kWh / 元(物业)
+  tiers_json    TEXT NOT NULL,              -- [{"cap":41,"price":3.5},{"cap":11,"price":5.25},{"cap":null,"price":10.5}] cap=档容量(末档null=∞)
+  season_json   TEXT,                       -- 仅电：{"months":[5,6,7,8,9,10],"tiers":[{...}]} 夏季档；null=无季节切换（非夏季用 tiers_json）
+  monthly_fee   REAL,                       -- 仅物业：每月固定费用（无阶梯时用）；tiers_json 可留 [{"cap":null,"price":<monthly_fee>}]
+  remark        TEXT NOT NULL DEFAULT '',
+  created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  updated_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_utility_rules_book ON utility_rules(book_id, type);
+
+-- 账单记录表：一条 = 一次缴费账单（覆盖 N 个月）。一笔缴费可关联多笔流水
+-- （队友分拆支付：同账单区间、缴费相差 ≤7 天的多笔自动并入同一账单，按合计金额反推用量）。
+CREATE TABLE IF NOT EXISTS utility_records (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id      INTEGER NOT NULL,
+  type         TEXT NOT NULL,
+  rule_id      INTEGER,                     -- 生成时命中的规则快照引用
+  bill_start   TEXT NOT NULL,               -- 覆盖起始月 'YYYY-MM'
+  bill_end     TEXT NOT NULL,               -- 覆盖结束月
+  usage_total  REAL,                        -- 本期总用量（账单周期口径，非月均）；物业无用量=null
+  tier_level   INTEGER NOT NULL DEFAULT 1,  -- 命中最高档 1/2/3（第2档起高亮，第3档更强）
+  charge       REAL NOT NULL DEFAULT 0,     -- 应缴原价（用量×规则正向算）
+  discount     REAL NOT NULL DEFAULT 0,     -- 优惠金额（手动补；实付+优惠=原价）
+  paid         REAL NOT NULL DEFAULT 0,     -- 实付 = 关联流水合计
+  flow_ids     TEXT NOT NULL DEFAULT '[]',  -- JSON 数组：关联流水 id（多笔分拆支付）
+  usage_locked INTEGER NOT NULL DEFAULT 0,  -- 1=用量被手动改过/补过优惠，自动合并不再覆盖 usage/charge
+  status       TEXT NOT NULL DEFAULT 'auto',-- auto自动 | pending待校正 | corrected已校正 | manual手动
+  remark       TEXT NOT NULL DEFAULT '',
+  created_at   TEXT NOT NULL DEFAULT (datetime('now','localtime')),
+  updated_at   TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_utility_records_book ON utility_records(book_id, type, bill_start);
+`);
 
 // 给用户分配一个稳定的颜色（按用户名哈希，避免每次刷新都变）
 const USER_PALETTE = ["#6366f1","#ef4444","#f59e0b","#10b981","#3b82f6","#ec4899","#8b5cf6","#14b8a6","#f97316","#0ea5e9","#a855f7","#22c55e"];

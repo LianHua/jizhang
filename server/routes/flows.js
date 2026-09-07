@@ -3,6 +3,7 @@ import dayjs from "dayjs";
 import { db } from "../db.js";
 import { auth, requireBook, wrap } from "../mw.js";
 import { tryDeposit } from "./wallets.js";
+import { utilitySyncFlowById, utilityRemoveFlowById } from "./utility.js";
 
 const r = Router();
 r.use(auth);
@@ -338,6 +339,9 @@ r.post(
     // 定期存入触发（收入流水 → 按钱包规则自动分配）
     try { tryDeposit(req.bookId, { flow_time, category, attribution: attr.text, type, amount, user_id: req.user.id }); }
     catch (e) { console.error("[tryDeposit]", e); }
+    // 水电气物业用量：命中「住房分类+名称关键词」的流水自动生成/并入账单（幂等）
+    try { utilitySyncFlowById(req.bookId, Number(info.lastInsertRowid)); }
+    catch (e) { console.error("[utility-sync]", e); }
     res.json({ id: info.lastInsertRowid });
   })
 );
@@ -465,6 +469,9 @@ r.put(
       newSource,
       cur.id
     );
+    // 流水被编辑（改名/改金额/改时间/换分类）→ 幂等重建水电气账单关联
+    try { utilitySyncFlowById(req.bookId, Number(cur.id)); }
+    catch (e) { console.error("[utility-sync]", e); }
     res.json({ ok: true });
   })
 );
@@ -507,6 +514,9 @@ r.delete(
       );
     });
     tx();
+    // 流水删除 → 从水电气账单解绑（账单空则删除）
+    try { utilityRemoveFlowById(req.bookId, Number(req.params.id)); }
+    catch (e) { console.error("[utility-remove]", e); }
     res.json({ ok: true });
   })
 );
@@ -544,12 +554,14 @@ r.post(
       .prepare("SELECT * FROM flows_trash WHERE id=? AND book_id=?")
       .get(req.params.id, req.bookId);
     if (!t) return res.status(404).json({ error: "回收站中不存在该记录" });
+    let newFlowId = null;
     const tx = db.transaction(() => {
-      db.prepare(
+      const ins = db.prepare(
         `INSERT INTO flows (book_id, user_id, attribution, attribution_uid, type, amount, category,
                             payment_method, description, flow_time, source, created_at, updated_at)
          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,datetime('now','localtime'))`
-      ).run(
+      );
+      const insInfo = ins.run(
         t.book_id,
         t.user_id,
         t.attribution || "",
@@ -563,9 +575,13 @@ r.post(
         t.source || "",
         t.created_at || null
       );
+      newFlowId = Number(insInfo.lastInsertRowid);
       db.prepare("DELETE FROM flows_trash WHERE id=?").run(t.id);
     });
     tx();
+    // 恢复的流水重新参与水电气账单生成
+    try { utilitySyncFlowById(req.bookId, newFlowId); }
+    catch (e) { console.error("[utility-sync]", e); }
     res.json({ ok: true });
   })
 );

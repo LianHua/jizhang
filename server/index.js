@@ -20,6 +20,7 @@ import savingsRoutes from "./routes/savings.js";
 import walletRoutes from "./routes/wallets.js";
 import syncRoutes from "./routes/sync.js";
 import merchantRoutes from "./routes/merchants.js";
+import utilityRoutes from "./routes/utility.js";
 import { logOp } from "./oplog.js";
 import oplogRoutes from "./oplog.js";
 import { generateDueRecurring } from "./lib/recurring.js";
@@ -126,6 +127,7 @@ app.use("/api/savings", savingsRoutes);
 app.use("/api/wallets", walletRoutes);
 app.use("/api/sync", syncRoutes);
 app.use("/api/merchants", merchantRoutes);
+app.use("/api/utility", utilityRoutes);
 app.use("/api/oplogs", oplogRoutes);
 
 // ---------- 静态前端 ----------

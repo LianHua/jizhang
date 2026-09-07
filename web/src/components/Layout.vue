@@ -25,6 +25,7 @@ const allNav = [
   { name: "categories", label: "分类", icon: "🏷️" },
   { name: "presets", label: "常用名称", icon: "🔖" },
   { name: "bills", label: "账单", icon: "🧾" },
+  { name: "utility", label: "水电气", icon: "🚰" },
   { name: "savings", label: "存款目标", icon: "🏁" },
   { name: "wallets", label: "分类钱包", icon: "👝" },
   { name: "users", label: "用户管理", icon: "👥", admin: true },
