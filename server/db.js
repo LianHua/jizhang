@@ -405,6 +405,7 @@ CREATE TABLE IF NOT EXISTS utility_rules (
   updated_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_utility_rules_book ON utility_rules(book_id, type);
+`);
 
 // 存量迁移：规则关联分类列（v260908+ 支持规则绑定任意消费分类，默认住房兼容旧数据）
 // ⚠️ 必须在 CREATE TABLE 之后执行（否则全新库表不存在时 PRAGMA 为空 → ALTER 报 no such table）
@@ -414,6 +415,7 @@ addColumnIfMissing(
   "category TEXT NOT NULL DEFAULT '住房'"
 );
 
+db.exec(`
 -- 账单记录表：一条 = 一次缴费账单（覆盖 N 个月）。一笔缴费可关联多笔流水
 -- （队友分拆支付：同账单区间、缴费相差 ≤7 天的多笔自动并入同一账单，按合计金额反推用量）。
 CREATE TABLE IF NOT EXISTS utility_records (
