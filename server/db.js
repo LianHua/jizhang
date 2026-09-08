@@ -399,11 +399,20 @@ CREATE TABLE IF NOT EXISTS utility_rules (
   tiers_json    TEXT NOT NULL,              -- [{"cap":41,"price":3.5},{"cap":11,"price":5.25},{"cap":null,"price":10.5}] cap=档容量(末档null=∞)
   season_json   TEXT,                       -- 仅电：{"months":[5,6,7,8,9,10],"tiers":[{...}]} 夏季档；null=无季节切换（非夏季用 tiers_json）
   monthly_fee   REAL,                       -- 仅物业：每月固定费用（无阶梯时用）；tiers_json 可留 [{"cap":null,"price":<monthly_fee>}]
+  category      TEXT NOT NULL DEFAULT '住房', -- 关联的消费分类（识别口径：流水分类=该值 + 名称含关键词）；默认住房兼容老规则
   remark        TEXT NOT NULL DEFAULT '',
   created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime')),
   updated_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_utility_rules_book ON utility_rules(book_id, type);
+
+// 存量迁移：规则关联分类列（v260908+ 支持规则绑定任意消费分类，默认住房兼容旧数据）
+// ⚠️ 必须在 CREATE TABLE 之后执行（否则全新库表不存在时 PRAGMA 为空 → ALTER 报 no such table）
+addColumnIfMissing(
+  "utility_rules",
+  "category",
+  "category TEXT NOT NULL DEFAULT '住房'"
+);
 
 -- 账单记录表：一条 = 一次缴费账单（覆盖 N 个月）。一笔缴费可关联多笔流水
 -- （队友分拆支付：同账单区间、缴费相差 ≤7 天的多笔自动并入同一账单，按合计金额反推用量）。

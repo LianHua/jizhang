@@ -15,6 +15,10 @@ const MONTH_CHIPS = Array.from({ length: 12 }, (_, i) => i + 1);
 
 const rules = ref([]);
 const loading = ref(false);
+// 关联分类选项（v260908：规则可绑定任意消费分类，识别=规则分类+名称关键词）
+const cats = ref([]);
+const DEFAULT_CAT = "住房";
+const expenseCats = computed(() => cats.value.filter((c) => c.type === "expense"));
 
 const showEdit = ref(false);
 const editingId = ref(null); // null = 新建
@@ -51,6 +55,7 @@ function blankForm(type) {
   const fm = {
     type,
     name: "",
+    category: DEFAULT_CAT,
     effective_from: thisYm,
     effective_to: "",
     bill_span: m.span,
@@ -69,8 +74,12 @@ function blankForm(type) {
 async function load() {
   loading.value = true;
   try {
-    const { data } = await api.get("/utility/rules");
+    const [{ data }, catRes] = await Promise.all([
+      api.get("/utility/rules"),
+      api.get("/categories"),
+    ]);
     rules.value = data.list || [];
+    cats.value = Array.isArray(catRes.data) ? catRes.data : [];
   } finally {
     loading.value = false;
   }
@@ -86,6 +95,7 @@ function openEdit(rule) {
   f.value = {
     type: rule.type,
     name: rule.name || "",
+    category: rule.category || DEFAULT_CAT,
     effective_from: rule.effective_from,
     effective_to: rule.effective_to || "",
     bill_span: rule.bill_span,
@@ -152,6 +162,7 @@ async function save() {
   const payload = {
     type: f.value.type,
     name: f.value.name.trim(),
+    category: f.value.category || DEFAULT_CAT,
     effective_from: f.value.effective_from,
     effective_to: f.value.effective_to || "",
     bill_span: Math.max(1, Number(f.value.bill_span) || metaOf(f.value.type).span),
@@ -254,6 +265,8 @@ onMounted(load);
             <div class="rule-name">
               {{ rl.name || g.label + "规则" }}
               <span class="eff">{{ effText(rl) }}</span>
+              <span v-if="rl.category && rl.category !== DEFAULT_CAT" class="cat-chip">分类 {{ rl.category }}</span>
+              <span v-else class="cat-chip muted-chip">分类 {{ DEFAULT_CAT }}</span>
             </div>
             <div class="muted rule-sum">{{ summary(rl) }}</div>
           </div>
@@ -273,6 +286,12 @@ onMounted(load);
           <label>类型
             <select class="select" v-model="f.type" :disabled="!!editingId" @change="onTypeChange">
               <option v-for="t in TYPES" :key="t.type" :value="t.type">{{ t.icon }} {{ t.label }}</option>
+            </select>
+          </label>
+          <label>关联消费分类（识别该分类下含「水费/电费/燃气费/物业费」的支出流水）
+            <select class="select" v-model="f.category">
+              <option v-for="c in expenseCats" :key="c.name" :value="c.name">{{ c.icon }} {{ c.name }}</option>
+              <option v-if="f.category && !expenseCats.some((c) => c.name === f.category)" :value="f.category">{{ f.category }}（分类已删除）</option>
             </select>
           </label>
           <label>规则名称（选填，如 广州水费2026）
@@ -350,6 +369,8 @@ onMounted(load);
 .rule-main { flex: 1; min-width: 0; }
 .rule-name { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .eff { font-size: 12px; font-weight: 400; color: var(--primary); background: var(--primary-soft); padding: 1px 8px; border-radius: 999px; }
+.cat-chip { font-size: 11px; font-weight: 400; padding: 1px 8px; border-radius: 999px; background: var(--surface-2); color: var(--text-2); }
+.cat-chip.muted-chip { background: transparent; border: 1px dashed var(--border); }
 .rule-sum { font-size: 12px; margin-top: 4px; }
 .rule-ops { display: flex; gap: 6px; flex-shrink: 0; }
 

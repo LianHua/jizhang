@@ -374,6 +374,12 @@ onMounted(loadAbout);
         <span class="muted">自助注册</span>
         <span class="tag">已关闭 · 账号由管理员创建</span>
       </div>
+      <div class="row" style="align-items:center;gap:14px;margin-top:12px">
+        <span class="muted">开源仓库</span>
+        <a href="https://github.com/h223492759/jizhang" target="_blank" rel="noopener" class="gh-link">
+          github.com/h223492759/jizhang ↗
+        </a>
+      </div>
       <p class="muted" style="font-size:13px;margin-top:14px;line-height:1.7">
         记账本 · 自建版　|　数据存储于本机 SQLite，完全私有可控。<br />
         新增账号请管理员到「用户管理」页操作；端口等配置改 docker-compose 环境变量后重启容器。<br />
@@ -407,6 +413,8 @@ code { background: var(--surface-2); padding: 1px 6px; border-radius: 4px; font-
 .about-app { display: inline-flex; align-items: center; gap: 8px; }
 .about-logo { width: 26px; height: 26px; border-radius: 6px; }
 .about-ver { cursor: pointer; user-select: none; }
+.gh-link { color: var(--primary); font-weight: 600; text-decoration: none; overflow-wrap: anywhere; }
+.gh-link:hover { text-decoration: underline; }
 .oplog-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px dashed var(--border); font-size: 12px; }
 .oplog-row:last-child { border-bottom: none; }
 .oplog-method { flex: 0 0 auto; font-weight: 500; padding: 0 6px; border-radius: 4px; font-size: 11px; }

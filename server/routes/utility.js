@@ -36,10 +36,16 @@ const monthSpan = (a, b) => {
   return (y2 - y1) * 12 + (m2 - m1) + 1;
 };
 
-// 识别一笔流水属于哪类水电气（分类住房 + 名称含关键词）；不命中返回 null
+// 识别一笔流水属于哪类水电气（名称含关键词 → 类型）；不命中返回 null
+// v260908：分类不再硬编码「住房」——规则可绑定任意消费分类，分类匹配下沉到
+// pickRule(cat)，由「该类型在当月生效的规则里 category 是否等于流水分类」决定是否计入。
 export function matchUtilityType(flow) {
   if (!flow || flow.type !== "expense") return null;
-  if (String(flow.category || "").trim() !== HOUSE_CAT) return null;
+  return kwTypeOf(flow);
+}
+
+// 关键词 → 类型（不含分类判断；分类判断在 pickRule 按规则绑定分类精确匹配）
+function kwTypeOf(flow) {
   const desc = String(flow.description || "");
   for (const { kw, type } of KW_ORDER) {
     if (desc.includes(kw)) return type;
@@ -47,14 +53,34 @@ export function matchUtilityType(flow) {
   return null;
 }
 
-// 流水名称里当前用的识别关键词（与 matchUtilityType 一致，用于 SQL LIKE）
+// 流水名称里当前用的识别关键词（与 kwTypeOf 一致，用于 SQL LIKE）
 function kwOf(type) {
   const hit = KW_ORDER.find((k) => k.type === type);
   return hit ? hit.kw : "";
 }
 
-// 取该类型在 ym（'YYYY-MM'）生效的规则段；无生效段（含规则生效日期之前）返回 null
-function pickRule(bookId, type, ym) {
+// 规则绑定的分类（默认住房）
+function ruleCategory(rule) {
+  return String(rule?.category || HOUSE_CAT).trim() || HOUSE_CAT;
+}
+
+// 取该类型在 ym（'YYYY-MM'）生效、且绑定分类=cat 的规则段；
+// 无生效段（含规则生效日期之前 / 该分类没有规则）返回 null
+function pickRule(bookId, type, ym, cat) {
+  const c = String(cat || "").trim() || HOUSE_CAT;
+  const rows = db
+    .prepare(
+      `SELECT * FROM utility_rules WHERE book_id=? AND type=? AND category=?
+         AND effective_from <= ? AND (effective_to IS NULL OR effective_to >= ?)
+         ORDER BY effective_from DESC LIMIT 1`
+    )
+    .all(bookId, type, c, ym, ym);
+  return rows[0] || null;
+}
+
+// 取该类型在 ym 生效的任一规则（不区分分类，取最新生效段）；
+// 手动添加账单等无流水上下文时使用
+function pickRuleAny(bookId, type, ym) {
   const rows = db
     .prepare(
       `SELECT * FROM utility_rules WHERE book_id=? AND type=?
@@ -63,6 +89,17 @@ function pickRule(bookId, type, ym) {
     )
     .all(bookId, type, ym, ym);
   return rows[0] || null;
+}
+
+// 该 type 在 ym 是否“存在任意生效规则”（用于判定流水是否因换分类/规则集变更而不再匹配）
+function hasAnyRule(bookId, type, ym) {
+  const r = db
+    .prepare(
+      `SELECT 1 FROM utility_rules WHERE book_id=? AND type=?
+         AND effective_from <= ? AND (effective_to IS NULL OR effective_to >= ?) LIMIT 1`
+    )
+    .get(bookId, type, ym, ym);
+  return !!r;
 }
 
 function parseTiers(rule) {
@@ -191,16 +228,18 @@ function gasTierByMoney(totalMoney, tiers) {
   return tiers.length || 1;
 }
 
-// 该类型当年（缴费自然年）全部流水金额合计 —— 燃气年累计口径
-function annualPaidOf(bookId, type, year) {
+// 该类型当年（缴费自然年）按「规则绑定分类」口径的流水金额合计 —— 燃气年累计
+// v260908：category 按生成该账单的规则绑定分类过滤（不同分类各自独立年累计）
+function annualPaidOf(bookId, type, year, cat) {
   const kw = kwOf(type);
+  const c = String(cat || "").trim() || HOUSE_CAT;
   const r = db
     .prepare(
       `SELECT COALESCE(SUM(amount),0) t FROM flows
         WHERE book_id=? AND type='expense' AND category=?
           AND flow_time>=? AND flow_time<? AND description LIKE ?`
     )
-    .get(bookId, HOUSE_CAT, `${year}-01-01`, `${year + 1}-01-01`, `%${kw}%`);
+    .get(bookId, c, `${year}-01-01`, `${year + 1}-01-01`, `%${kw}%`);
   return Number(r.t) || 0;
 }
 
@@ -232,6 +271,8 @@ function spanOfRule(rule) {
 // force=true：用户主动校正（补优惠/改用量）时即使 usage_locked 也重算用量与 charge；
 // force=false（自动合并路径）：usage_locked 的账单只更新 paid，不覆盖用户手改的量/价。
 function recomputeRecord(bookId, rec, rule, force) {
+  // 规则被删除后账单仍要可重算：兜底取该类型当月生效的最新规则（可能仍为 null）
+  if (!rule) rule = pickRuleAny(bookId, rec.type, rec.bill_start);
   const ids = flowIdsOf(rec);
   const paid = paidOfFlows(bookId, ids);
   const discount = Number(rec.discount) || 0;
@@ -256,9 +297,9 @@ function recomputeRecord(bookId, rec, rule, force) {
     tier = 1;
     usageTotal = null;
   } else if (rule?.cycle_type === "by_year") {
-    // 燃气：年累计。paidBefore = 当年总额 − 本账单总额
+    // 燃气：年累计。paidBefore = 当年总额 − 本账单总额（按规则绑定分类的年累计口径）
     const year = Number(String(rec.bill_start).slice(0, 4));
-    const annual = annualPaidOf(bookId, rec.type, year);
+    const annual = annualPaidOf(bookId, rec.type, year, ruleCategory(rule));
     const paidBefore = Math.max(0, round2(annual - paid));
     const tiers = parseTiers(rule);
     usageTotal = gasBreakdown(round2(paid + discount), paidBefore, tiers);
@@ -291,27 +332,50 @@ function recomputeRecord(bookId, rec, rule, force) {
 
 // 幂等生成：按流水当前值重建/并入账单。
 // 编辑（改名/改金额/改时间/换分类）后再次调用即可自动纠正旧账单。
-export function utilitySyncFlowById(bookId, flowId) {
+// opts.preserveOnNoRule=true（扫描历史）：流水不再匹配任何规则时保留原账单，防误删存量。
+export function utilitySyncFlowById(bookId, flowId, opts = {}) {
+  const preserveOnNoRule = !!opts.preserveOnNoRule;
   const flow = db
     .prepare("SELECT * FROM flows WHERE id=? AND book_id=?")
     .get(flowId, bookId);
   if (!flow) return;
-  // 先摘除旧关联（同名流水可能已在别的账单里）
-  utilityRemoveFlowById(bookId, flowId);
-  const type = matchUtilityType(flow);
-  if (!type) return;
+  // 先摘除旧关联（改名/换分类/改时间后自动纠正旧账单；KW 不命中的流水必须摘除）
+  const type = kwTypeOf(flow);
   const ym = String(flow.flow_time || "").slice(0, 7);
-  if (!/^\d{4}-\d{2}$/.test(ym)) return;
-  const rule = pickRule(bookId, type, ym);
-  if (!rule) return; // 规则生效日期之前 / 之后 的流水不计入
+  if (!type || !/^\d{4}-\d{2}$/.test(ym)) {
+    utilityRemoveFlowById(bookId, flowId);
+    return;
+  }
+  // v260908：按「规则绑定分类」精确匹配（老规则默认住房 → 老行为不变）
+  const rule = pickRule(bookId, type, ym, flow.category);
+  if (!rule) {
+    // 规则生效日期之前 / 该分类没有规则 → 不计入。
+    // 若该类型当月仍存在其他分类的生效规则（说明用户把这笔记到了别的分类，
+    // 编辑触发时从旧账单摘除）；scan 场景保留原账单（幂等保底，防误删存量）。
+    if (!preserveOnNoRule && hasAnyRule(bookId, type, ym)) {
+      utilityRemoveFlowById(bookId, flowId);
+    }
+    return;
+  }
   const bStart = ym;
   const bEnd = ymAdd(ym, spanOfRule(rule) - 1);
 
+  // v260908 双月账单错位修复：队友分拆支付的尾款若落在相邻月（双月账单 8/25 付一笔、
+  // 9/2 再付一笔），老逻辑按各自支付月各生成一张错位账单 → 均摊金额一月多一月少。
+  // 现优先并入「同类型 + 覆盖本月的现有账单」；无覆盖才按支付月新建账单。
   let rec = db
     .prepare(
-      `SELECT * FROM utility_records WHERE book_id=? AND type=? AND bill_start=? AND bill_end=?`
+      `SELECT * FROM utility_records WHERE book_id=? AND type=? AND bill_start<=? AND bill_end>=?
+         ORDER BY bill_start LIMIT 1`
     )
-    .get(bookId, type, bStart, bEnd);
+    .get(bookId, type, ym, ym);
+  if (!rec) {
+    rec = db
+      .prepare(
+        `SELECT * FROM utility_records WHERE book_id=? AND type=? AND bill_start=? AND bill_end=?`
+      )
+      .get(bookId, type, bStart, bEnd);
+  }
   if (rec) {
     const ids = flowIdsOf(rec);
     if (!ids.includes(Number(flowId))) ids.push(Number(flowId));
@@ -405,16 +469,19 @@ r.post(
     const tiers = Array.isArray(b.tiers) && b.tiers.length ? b.tiers : null;
     if (!tiers) return res.status(400).json({ error: "至少需要一个档位" });
     const span = Math.max(1, Number(b.bill_span) || 1);
+    // v260908：规则可绑定任意消费分类（识别口径=规则分类+名称关键词）；默认住房
+    const category = String(b.category || "").trim() || HOUSE_CAT;
     const info = db
       .prepare(
         `INSERT INTO utility_rules
-           (book_id,type,name,effective_from,effective_to,bill_span,cycle_type,unit,tiers_json,season_json,monthly_fee,remark)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+           (book_id,type,name,category,effective_from,effective_to,bill_span,cycle_type,unit,tiers_json,season_json,monthly_fee,remark)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
       )
       .run(
         req.bookId,
         type,
         String(b.name || TYPE_LABEL[type] || ""),
+        category,
         b.effective_from,
         b.effective_to || null,
         span,
@@ -445,11 +512,12 @@ r.put(
     const tiers = b.tiers !== undefined ? (Array.isArray(b.tiers) && b.tiers.length ? b.tiers : null) : null;
     if (b.tiers !== undefined && !tiers) return res.status(400).json({ error: "至少需要一个档位" });
     db.prepare(
-      `UPDATE utility_rules SET name=?, effective_from=?, effective_to=?, bill_span=?,
+      `UPDATE utility_rules SET name=?, category=?, effective_from=?, effective_to=?, bill_span=?,
               cycle_type=?, unit=?, tiers_json=?, season_json=?, monthly_fee=?, remark=?,
               updated_at=datetime('now','localtime') WHERE id=?`
     ).run(
       b.name !== undefined ? String(b.name) : cur.name,
+      b.category !== undefined ? (String(b.category).trim() || HOUSE_CAT) : ruleCategory(cur),
       b.effective_from !== undefined ? b.effective_from : cur.effective_from,
       b.effective_to !== undefined ? (b.effective_to || null) : cur.effective_to,
       Math.max(1, Number(b.bill_span ?? cur.bill_span) || 1),
@@ -532,7 +600,7 @@ r.post(
     }
     const ids = flowId ? [flowId] : [];
     const paid = b.paid !== undefined && b.paid !== "" ? round2(Number(b.paid)) : paidOfFlows(req.bookId, ids);
-    const rule = pickRule(req.bookId, type, b.bill_start);
+    const rule = pickRuleAny(req.bookId, type, b.bill_start);
     const usage = b.usage !== undefined && b.usage !== "" ? round2(Number(b.usage)) : null;
     const info = db
       .prepare(
@@ -591,7 +659,7 @@ r.put(
     let rec = db.prepare("SELECT * FROM utility_records WHERE id=?").get(cur.id);
     const rule = rec.rule_id
       ? db.prepare("SELECT * FROM utility_rules WHERE id=?").get(rec.rule_id)
-      : pickRule(req.bookId, rec.type, rec.bill_start);
+      : pickRuleAny(req.bookId, rec.type, rec.bill_start);
     // 用户校正后 status 语义：手动改过用量/补过优惠 → corrected（金额仍对不上则 pending）
     if (usageChanged || discount !== (Number(cur.discount) || 0)) {
       rec = recomputeRecord(req.bookId, rec, rule, true);
@@ -614,6 +682,8 @@ r.delete(
 );
 
 // ---------------- 存量流水扫描（配置规则后回填；幂等） ----------------
+// v260908：按「每条规则绑定的分类 + 名称关键词」扫描各自生效后的流水；
+// preserveOnNoRule=true → 已存在于旧账单但不再匹配任何规则的流水保留原账单（防误删存量）。
 r.post(
   "/scan",
   requireBook,
@@ -623,82 +693,139 @@ r.post(
     const counts = {};
     for (const type of types) {
       const kw = kwOf(type);
-      const min = db
-        .prepare("SELECT MIN(effective_from) m FROM utility_rules WHERE book_id=? AND type=?")
-        .get(req.bookId, type);
-      if (!min?.m) {
+      const rules = db
+        .prepare(
+          "SELECT * FROM utility_rules WHERE book_id=? AND type=? ORDER BY effective_from"
+        )
+        .all(req.bookId, type);
+      if (!rules.length) {
         counts[type] = 0;
         continue;
       }
-      const flows = db
-        .prepare(
-          `SELECT id FROM flows WHERE book_id=? AND type='expense' AND category=?
-             AND description LIKE ? AND flow_time >= ?`
-        )
-        .all(req.bookId, HOUSE_CAT, `%${kw}%`, `${min.m}-01 00:00:00`);
-      for (const f of flows) utilitySyncFlowById(req.bookId, f.id);
-      counts[type] = flows.length;
+      const seen = new Set();
+      for (const rule of rules) {
+        const cat = ruleCategory(rule);
+        const flows = db
+          .prepare(
+            `SELECT id FROM flows WHERE book_id=? AND type='expense' AND category=?
+               AND description LIKE ? AND flow_time >= ?`
+          )
+          .all(req.bookId, cat, `%${kw}%`, `${rule.effective_from}-01 00:00:00`);
+        for (const f of flows) {
+          if (seen.has(f.id)) continue; // 同一笔被多段规则同时扫到只处理一次
+          seen.add(f.id);
+          utilitySyncFlowById(req.bookId, f.id, { preserveOnNoRule: true });
+        }
+      }
+      counts[type] = seen.size;
     }
     res.json({ counts });
   })
 );
 
-// ---------------- 月度视图（均摊展示；高亮用 tier_level） ----------------
+// 月度视图核心：账单覆盖月份与查询年相交的部分按「均摊取整」分配。
+// usage 余数归账单最后一个月（与月份列表整数显示一致）；
+// 金额每期 = round2(实付/覆盖月数)，各期相等（四舍五入一致）。
+function computeMonths(bookId, type, year) {
+  const yStart = `${year}-01`;
+  const yEnd = `${year}-12`;
+  const recs = db
+    .prepare(
+      `SELECT * FROM utility_records WHERE book_id=?
+         AND (type=? OR ?='') AND bill_start<=? AND bill_end>=?
+       ORDER BY bill_start`
+    )
+    .all(bookId, type, type, yEnd, yStart);
+  const months = Array.from({ length: 12 }, (_, i) => ({
+    month: i + 1,
+    ym: `${year}-${String(i + 1).padStart(2, "0")}`,
+    usage: 0,
+    amount: 0,
+    tier: 0,
+    hasBill: false,
+    note: "",
+  }));
+  for (const rec of recs) {
+    const span = recSpan(rec);
+    const totalU = Number(rec.usage_total) || 0;
+    const baseU = Math.floor(totalU / span); // 均摊取整：余数归覆盖的最后一个月
+    const remU = round2(totalU - baseU * span);
+    // 金额每期均分（round2）：同一张账单分到各月金额相等，避免一月多一月少
+    const amtPer = round2((Number(rec.paid) || 0) / span);
+    const [sY, sM] = String(rec.bill_start).split("-").map(Number);
+    const [eY, eM] = String(rec.bill_end).split("-").map(Number);
+    // 本账单覆盖的月份集合（仅取与查询年相交部分）
+    const mList = [];
+    let cy = sY, cm = sM;
+    while (cy < eY || (cy === eY && cm <= eM)) {
+      if (cy === year) mList.push(cm);
+      cm += 1;
+      if (cm > 12) { cm = 1; cy += 1; }
+      if (mList.length > 48) break;
+    }
+    for (const m of mList) {
+      const row = months[m - 1];
+      const isLast = m === eM && eY === year;
+      row.hasBill = true;
+      row.tier = Math.max(row.tier, Number(rec.tier_level) || 1);
+      row.usage += isLast ? baseU + remU : baseU;
+      row.amount = round2(row.amount + amtPer);
+      if (rec.status === "pending") row.note = "待校正";
+    }
+  }
+  return months;
+}
+
+// ---------------- 月度视图（按月看：某年 12 个月） ----------------
 r.get(
   "/months",
   requireBook,
   wrap((req, res) => {
     const type = String(req.query.type || "");
     const year = Number(req.query.year) || new Date().getFullYear();
-    const yStart = `${year}-01`;
-    const yEnd = `${year}-12`;
+    res.json({ year, months: computeMonths(req.bookId, type, year) });
+  })
+);
+
+// ---------------- 年度视图（按年看：每年一行汇总 + 高亮取该年最高档） ----------------
+r.get(
+  "/years",
+  requireBook,
+  wrap((req, res) => {
+    const type = String(req.query.type || "");
+    // 有账单覆盖的年份（跨年账单两端年份都算）
     const recs = db
       .prepare(
-        `SELECT * FROM utility_records WHERE book_id=?
-           AND (type=? OR ?='') AND bill_start<=? AND bill_end>=?
-         ORDER BY bill_start`
+        `SELECT bill_start, bill_end FROM utility_records WHERE book_id=?
+           AND (type=? OR ?='')`
       )
-      .all(req.bookId, type, type, yEnd, yStart);
-    const months = Array.from({ length: 12 }, (_, i) => ({
-      month: i + 1,
-      ym: `${year}-${String(i + 1).padStart(2, "0")}`,
-      usage: 0,
-      amount: 0,
-      tier: 0,
-      hasBill: false,
-      note: "",
-    }));
+      .all(req.bookId, type, type);
+    const yearSet = new Set();
     for (const rec of recs) {
-      const ids = flowIdsOf(rec);
-      const dec = decorate(req.bookId, { ...rec, flow_ids: JSON.stringify(ids) });
-      const span = recSpan(rec);
-      const totalU = Number(rec.usage_total) || 0;
-      const baseU = Math.floor(totalU / span); // 均摊取整：余数归覆盖的最后一个月
-      const remU = round2(totalU - baseU * span);
-      const amtPer = round2((Number(rec.paid) || 0) / span);
       const [sY, sM] = String(rec.bill_start).split("-").map(Number);
       const [eY, eM] = String(rec.bill_end).split("-").map(Number);
-      // 本账单覆盖的月份集合（仅取与查询年相交部分）
-      const mList = [];
       let cy = sY, cm = sM;
+      let guard = 0;
       while (cy < eY || (cy === eY && cm <= eM)) {
-        if (cy === year) mList.push(cm);
+        yearSet.add(cy);
         cm += 1;
         if (cm > 12) { cm = 1; cy += 1; }
-        if (mList.length > 48) break;
-      }
-      const isLastMonth = (m) => m === eM; // 余数归账单最后一个月
-      for (const m of mList) {
-        const row = months[m - 1];
-        const isLast = m === eM && eY === year;
-        row.hasBill = true;
-        row.tier = Math.max(row.tier, Number(rec.tier_level) || 1);
-        row.usage += isLast ? baseU + remU : baseU;
-        row.amount = round2(row.amount + amtPer);
-        if (rec.status === "pending") row.note = "待校正";
+        if (++guard > 120) break;
       }
     }
-    res.json({ year, months });
+    const list = [...yearSet].sort((a, b) => b - a).map((year) => {
+      const months = computeMonths(req.bookId, type, year);
+      let usage = 0, amount = 0, tier = 0, hasBill = false;
+      for (const m of months) {
+        if (!m.hasBill) continue;
+        hasBill = true;
+        usage += m.usage;
+        amount = round2(amount + m.amount);
+        tier = Math.max(tier, m.tier);
+      }
+      return { year, usage: Math.round(usage), amount, tier, hasBill };
+    });
+    res.json({ list });
   })
 );
 

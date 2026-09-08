@@ -49,6 +49,12 @@ import { toast } from "../toast.js";
       <div class="row"><span class="k">版本号</span><span class="v">{{ meta.version }}</span></div>
       <div class="row"><span class="k">数据存储</span><span class="v">本机 SQLite（/app/data）</span></div>
       <div class="row"><span class="k">部署方式</span><span class="v">Docker 单容器</span></div>
+      <div class="row">
+        <span class="k">开源仓库</span>
+        <a class="v link" href="https://github.com/h223492759/jizhang" target="_blank" rel="noopener">
+          github.com/h223492759/jizhang ↗
+        </a>
+      </div>
     </div>
 
     <p class="muted foot">版本号格式 vYYMMDD-HHMM，对应镜像构建时间。</p>
@@ -73,5 +79,7 @@ import { toast } from "../toast.js";
 .row:last-child { border-bottom: none; }
 .k { color: var(--text-2); }
 .v { font-weight: 600; }
+.link { color: var(--primary); text-decoration: none; overflow-wrap: anywhere; padding-left: 12px; }
+.link:hover { text-decoration: underline; }
 .foot { font-size: 12px; text-align: center; margin-top: 4px; }
 </style>
