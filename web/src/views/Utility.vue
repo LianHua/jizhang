@@ -66,23 +66,49 @@ const chartRows = computed(() =>
 );
 const isProperty = computed(() => segType.value === "property");
 const chartUnit = computed(() => curType.value.unit);
-// 档位阈值：取第一条有账单行的 tierThresholds（同一类型/年内的规则一致；跨年可能变，按行取更准）
-function tierMarkLine(seriesName) {
-  // 收集所有有账单行的非 null 阈值
+// v260911：跨行找「该类型规则 cycleType」—— by_year 时月视图不画档位虚线
+const rowsCycleType = computed(() => {
+  for (const r of chartRows.value) if (r.cycleType) return r.cycleType;
+  return null;
+});
+// v260911：跨行最大 tier（用于「全年都没超第 2 档时第 3 档虚线不放」）
+const maxTierAcrossRows = computed(() =>
+  chartRows.value.reduce((a, r) => Math.max(a, Number(r.tier) || 0), 0)
+);
+// v260911：跨行最大柱值（物业=amount、其他=usage）
+const maxValueAcrossRows = computed(() => {
+  if (!chartRows.value.length) return 0;
+  return chartRows.value.reduce((a, r) => {
+    const v = isProperty.value ? Number(r.amount || 0) : Number(r.usage || 0);
+    return v > a ? v : a;
+  }, 0);
+});
+// 档位阈值 → markLine 配置
+//   - 物业费无档位 → 不画
+//   - 燃气 by_year 且月模式 → 不画（年累计档位在月模式无意义）
+//   - 全年 maxTier<2 → 第 2 档虚线放顶、第 3 档不画（腾空间给柱状条）
+//   - 其他：按 tierThresholds 全画
+function tierMarkLine() {
+  if (isProperty.value) return undefined;
+  // 燃气 by_year 月模式不画档位虚线
+  if (viewMode.value === "month" && rowsCycleType.value === "by_year") return undefined;
   const s = new Set();
   for (const r of chartRows.value) {
     if (r.tierThresholds) {
       for (const t of r.tierThresholds) if (t != null) s.add(t);
     }
   }
+  if (!s.size) return undefined;
   const arr = [...s].sort((a, b) => a - b);
-  if (!arr.length) return undefined;
-  // 第2档=第1个阈值（橙），第3档=第2个阈值（红）
+  // maxTierAcrossRows<2：仅画第 2 档虚线（i=0），且 y 放到接近 maxY（腾空间给柱）
+  const topOnly = maxTierAcrossRows.value < 2 && arr.length >= 2;
+  const draw = topOnly ? arr.slice(0, 1) : arr;
+  const topY = Math.ceil(maxValueAcrossRows.value * 1.1) || 1;
   return {
     symbol: "none",
     silent: true,
-    data: arr.map((v, i) => ({
-      yAxis: v,
+    data: draw.map((v, i) => ({
+      yAxis: topOnly ? Math.ceil(topY * 0.95) : v,
       lineStyle: {
         type: "dashed",
         color: i === 0 ? "#f59e0b" : "#ef4444",
@@ -92,36 +118,47 @@ function tierMarkLine(seriesName) {
     })),
   };
 }
+// v260911：柱按行 tier 着色（物业费统一蓝；水电气 1档=绿 / 2档=橙 / 3档及以上=红）
+function barItemStyle(tier) {
+  if (isProperty.value) return { color: "#6366f1" };
+  const t = Number(tier) || 1;
+  if (t >= 3) return { color: "#ef4444" };
+  if (t === 2) return { color: "#f59e0b" };
+  return { color: "#10b981" };
+}
 const chartOpt = computed(() => {
   const rows = chartRows.value;
   if (!rows.length) return null;
   const labels = rows.map((r) =>
     viewMode.value === "year" ? r.year + "年" : r.month + "月"
   );
-// 物业=金额柱；水电气=用量柱
-    const values = rows.map((r) =>
-      isProperty.value ? Number(r.amount || 0) : Number(r.usage || 0)
-    );
-    const mark = tierMarkLine();
-    // v260910：yAxis.max 至少覆盖到最大档位阈值（避免档位虚线被裁到图表外看不到）
-    // echarts 默认 dataMax 自动包含 markLine，但显式设更稳
-    const tierArr = mark ? mark.data.map((d) => d.yAxis) : [];
-    const maxValue = values.length
-      ? values.reduce((a, b) => (b > a ? b : a), values[0])
-      : 0;
-    const maxTier = tierArr.length ? tierArr.reduce((a, b) => (b > a ? b : a), tierArr[0]) : 0;
-    const yMax = Math.ceil(Math.max(maxValue, maxTier) * 1.1) || 1;
-    const series = [
-      {
-        name: isProperty.value ? "金额" : "用量",
-        type: "bar",
-        data: values,
-        barWidth: "38%",
-        itemStyle: { color: isProperty.value ? "#6366f1" : "#10b981", borderRadius: [4, 4, 0, 0] },
-        // 档位虚线（无档位不画；mark=undefined 时不设）
-        ...(mark ? { markLine: mark } : {}),
-      },
-    ];
+  // 物业=金额柱；水电气=用量柱
+  const values = rows.map((r) =>
+    isProperty.value ? Number(r.amount || 0) : Number(r.usage || 0)
+  );
+  const mark = tierMarkLine();
+  // v260911：yAxis.max 同时覆盖柱值与档位阈值（如全年都没超 2 档，把第 2 档虚线放到 top）
+  const tierArr = mark ? mark.data.map((d) => d.yAxis) : [];
+  const maxValue = values.length
+    ? values.reduce((a, b) => (b > a ? b : a), values[0])
+    : 0;
+  const maxTier = tierArr.length ? tierArr.reduce((a, b) => (b > a ? b : a), tierArr[0]) : 0;
+  const yMax = Math.ceil(Math.max(maxValue, maxTier) * 1.1) || 1;
+  // v260911：每根柱按行 tier 着色；echarts 接受 data 为 object[]，每项 { value, itemStyle }
+  const data = rows.map((r, i) => ({
+    value: values[i],
+    itemStyle: { ...barItemStyle(r.tier), borderRadius: [4, 4, 0, 0] },
+  }));
+  const series = [
+    {
+      name: isProperty.value ? "金额" : "用量",
+      type: "bar",
+      data,
+      barWidth: "38%",
+      // 档位虚线（无档位不画；mark=undefined 时不设）
+      ...(mark ? { markLine: mark } : {}),
+    },
+  ];
   return {
     tooltip: {
       trigger: "axis",
@@ -146,7 +183,8 @@ const chartOpt = computed(() => {
       type: "value",
       name: isProperty.value ? "金额(¥)" : `用量(${chartUnit.value})`,
       max: yMax,
-      splitLine: { lineStyle: { color: "var(--border, #e5e7eb)" } },
+      // v260911：默认 splitLine 太密，关掉（档位虚线已够用）
+      splitLine: { show: false },
     },
     series,
   };
@@ -427,7 +465,8 @@ watch(year, refresh);
       <div v-if="viewMode === 'year'" class="card month-card">
         <div v-for="y in years" :key="y.year" :class="['month-row', tierClass(y.tier), { off: !y.hasBill }]" @click="y.hasBill && viewYear(y.year)">
           <span class="col-name">{{ y.year }}年</span>
-          <span class="col-usage">{{ y.hasBill ? y.usage : "—" }}<em class="unit">{{ y.hasBill ? curType.unit : "" }}</em></span>
+          <!-- v260911：单位始终显示（物业"元"统一占位，避免有的有"元"有的没） -->
+          <span class="col-usage">{{ y.hasBill ? y.usage : "—" }}<em class="unit">{{ curType.unit }}</em></span>
           <span class="col-tier">
             <span v-if="tierText(y.tier)" class="tier-badge" :class="tierClass(y.tier)">{{ tierText(y.tier) }}</span>
             <span v-else class="muted slot">—</span>
@@ -446,7 +485,8 @@ watch(year, refresh);
           @click="m.hasBill && openDetail(m.month)"
         >
           <span class="col-name">{{ m.month }}月</span>
-          <span class="col-usage">{{ fmtUsage(m) }}<em class="unit">{{ m.hasBill ? curType.unit : "" }}</em></span>
+          <!-- v260911：单位始终显示（物业"元"统一占位，避免有的有"元"有的没） -->
+          <span class="col-usage">{{ fmtUsage(m) }}<em class="unit">{{ curType.unit }}</em></span>
           <span class="col-tier">
             <span v-if="tierText(m.tier)" class="tier-badge" :class="tierClass(m.tier)">{{ tierText(m.tier) }}</span>
             <span v-else-if="m.note" class="pend">{{ m.note }}</span>

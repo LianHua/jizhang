@@ -724,14 +724,15 @@ r.post(
 );
 
 // 月度视图核心：返回当年 12 个月全量（v260910 恢复 v2.2.6 前结构——不按规则裁剪月份行）。
-// 展示语义（用户 2026-09-10 确认）：
+// v260910 金额平摊改：所有类型 amount = paid / span，平摊到覆盖月。
+// 用户 2026-09-10 语义：
 //  - 用量均摊：双月/多期账单 usage 平摊到覆盖月，余数归账单最后一个月；
-//  - 金额保持账单月：实付金额全额计入账单起始月（= 缴费/流水月 bill_start），
-//    覆盖的其余月金额为 0（趋势表/月份行只在该月看到完整金额）。
-// 每行附加 tierThresholds（档位累计上限，物业费无档位=null）便于趋势图画虚线。
+//  - 金额均摊：实付金额 / 覆盖月数 = 该账单区间内每月金额（用户题面：水费双月缴费每月该一致；
+//    物业费 3 月一交年交 4 次每月该一致 = 82 元）。
+// 每行附加 tierThresholds（档位累计上限，物业费无档位=null）+ cycleType（前端按 by_year 决定档位虚线是否在月视图显示）。
 function computeMonths(bookId, type, year) {
-  const yStart = `${year}-01`;
-  const yEnd = `${year}-12`;
+  const yStart = `${year}-01-01`; // v260911：传月初 'YYYY-MM-01'；effective_from 存的是 'YYYY-MM-DD'，字典序 'YYYY-MM' < 'YYYY-MM-DD' 会让 effective_from<=ym 永不命中
+  const yEnd = `${year}-12-31`;
   // 选 active rule（按 year 中点选最匹配的规则段）取档位阈值（仅用于虚线展示，不裁剪数据）
   const activeRule = pickRuleAny(bookId, type, yStart);
   const tiers = activeRule ? effTiers(activeRule, yStart) : [];
@@ -758,6 +759,8 @@ function computeMonths(bookId, type, year) {
     note: "",
     tierThresholds: isProperty ? null : tierThresholds, // 物业费无档位阈值
     ruleUnit: activeRule?.unit || null,
+    // v260910：前端按 cycleType 决定 by_year 时月视图不画档位虚线（年累计档位按年）
+    cycleType: activeRule?.cycle_type || null,
   }));
   const recs = db
     .prepare(
@@ -789,8 +792,9 @@ function computeMonths(bookId, type, year) {
       row.hasBill = true;
       row.tier = Math.max(row.tier, Number(rec.tier_level) || 1);
       row.usage += isLast ? baseU + remU : baseU;
-      // 金额保持账单月：全额只在缴费月（账单起始月 = 流水月）显示；其余覆盖月金额 0
-      if (sY === year && m === sM) row.amount = round2(row.amount + paid);
+      // v260910：金额按账单平摊到覆盖月（用户2026-09-10 期望：水费双月缴费每月一致=paid/2，
+      // 物业费 3 月一交年交 4 次=每月 paid/3。覆盖月内每月 amount 一致。）
+      row.amount = round2(row.amount + paid / span);
       if (rec.status === "pending") row.note = "待校正";
     }
   }
