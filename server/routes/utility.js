@@ -723,30 +723,23 @@ r.post(
   })
 );
 
-// 月度视图核心：返回当年 12 个月全量（v260910 恢复 v2.2.6 前结构——不按规则裁剪月份行）。
-// v260910 金额平摊改：所有类型 amount = paid / span，平摊到覆盖月。
-// 用户 2026-09-10 语义：
-//  - 用量均摊：双月/多期账单 usage 平摊到覆盖月，余数归账单最后一个月；
-//  - 金额均摊：实付金额 / 覆盖月数 = 该账单区间内每月金额（用户题面：水费双月缴费每月该一致；
-//    物业费 3 月一交年交 4 次每月该一致 = 82 元）。
-// 每行附加 tierThresholds（档位累计上限，物业费无档位=null）+ cycleType（前端按 by_year 决定档位虚线是否在月视图显示）。
+// ---------------- 月度视图（按月看：某年 12 个月） ----------------
+// v2.2.13 语义反转（用户 2026-09-10 第 4 轮定论）：
+//  - 金额回到 v2.2.6「缴费月累计」：paid 全额累加在账单起始月（bill_start，对应流水月=真实缴费月），
+//    覆盖的其余月金额为 0。趋势表/月份行只在缴费月看到完整金额。
+//  - 用量双月完全一致（取消余数归 last 的旧行为）：
+//    avgU = Math.round(totalU/span)，所有覆盖月都 +avgU。
+//    视觉一致优先；如 25/2 → 两月都 13（不再 12+13）；23/2 → 两月都 12。
+//    跨月数据库里仍是账单的 totalU，月度 Σmonth.usage 可能 ±1m³，
+//    这是用户期望的「双月看起来相等」取舍，非 BUG。
+//  - 取消下发 tierThresholds：用户要求趋势图不再画档位虚线。
 function computeMonths(bookId, type, year) {
-  const yStart = `${year}-01-01`; // v260911：传月初 'YYYY-MM-01'；effective_from 存的是 'YYYY-MM-DD'，字典序 'YYYY-MM' < 'YYYY-MM-DD' 会让 effective_from<=ym 永不命中
-  const yEnd = `${year}-12-31`;
-  // 选 active rule（按 year 中点选最匹配的规则段）取档位阈值（仅用于虚线展示，不裁剪数据）
-  const activeRule = pickRuleAny(bookId, type, yStart);
-  const tiers = activeRule ? effTiers(activeRule, yStart) : [];
-  const tierThresholds = [];
-  let acc = 0;
-  for (const t of tiers) {
-    if (t.cap == null || Number(t.cap) === Infinity) {
-      tierThresholds.push(null);
-      break;
-    }
-    acc += Number(t.cap);
-    tierThresholds.push(acc);
-  }
-  // 物业费无档位时清空阈值（趋势图不画虚线）
+  // v2.2.13 字典序坑：bill_start/bill_end 存 7 位 'YYYY-MM'（如 '2025-01'），
+  // 若比较参数用 10 位 'YYYY-MM-DD'，'2025-01' < '2025-01-01' → 每年 1 月账单被滤掉。
+  // 统一用 substr(1,7) 在 SQL 侧归一化，兼容库内 7/10 位两种存量。
+  const yStart = `${year}-01`;
+  const yEnd = `${year}-12`;
+  const activeRule = pickRuleAny(bookId, type, `${year}-01-01`);
   const isProperty = type === "property";
 
   const months = Array.from({ length: 12 }, (_, i) => ({
@@ -754,26 +747,25 @@ function computeMonths(bookId, type, year) {
     ym: `${year}-${String(i + 1).padStart(2, "0")}`,
     usage: 0,
     amount: 0,
+    amountAvg: 0, // v2.2.13：账单 paid 均摊到覆盖月（物业/水/气中间列与趋势图用）
     tier: 0,
     hasBill: false,
     note: "",
-    tierThresholds: isProperty ? null : tierThresholds, // 物业费无档位阈值
     ruleUnit: activeRule?.unit || null,
-    // v260910：前端按 cycleType 决定 by_year 时月视图不画档位虚线（年累计档位按年）
     cycleType: activeRule?.cycle_type || null,
   }));
   const recs = db
     .prepare(
-      `SELECT * FROM utility_records WHERE book_id=?
-         AND (type=? OR ?='') AND bill_start<=? AND bill_end>=?
+      `SELECT * FROM utility_records WHERE book_id=? AND type=?
+         AND substr(bill_start,1,7)<=? AND substr(bill_end,1,7)>=?
        ORDER BY bill_start`
     )
-    .all(bookId, type, type, yEnd, yStart);
+    .all(bookId, type, yEnd, yStart);
   for (const rec of recs) {
     const span = recSpan(rec);
     const totalU = Number(rec.usage_total) || 0;
-    const baseU = Math.floor(totalU / span); // 均摊取整：余数归覆盖的最后一个月
-    const remU = round2(totalU - baseU * span);
+    // v2.2.13：用量展示层均摊，所有覆盖月一律 +avgU，无余数补偿
+    const avgU = Math.round(totalU / span);
     const paid = round2(Number(rec.paid) || 0);
     const [sY, sM] = String(rec.bill_start).split("-").map(Number);
     const [eY, eM] = String(rec.bill_end).split("-").map(Number);
@@ -788,16 +780,19 @@ function computeMonths(bookId, type, year) {
     }
     for (const m of mList) {
       const row = months[m - 1];
-      const isLast = m === eM && eY === year;
       row.hasBill = true;
       row.tier = Math.max(row.tier, Number(rec.tier_level) || 1);
-      row.usage += isLast ? baseU + remU : baseU;
-      // v260910：金额按账单平摊到覆盖月（用户2026-09-10 期望：水费双月缴费每月一致=paid/2，
-      // 物业费 3 月一交年交 4 次=每月 paid/3。覆盖月内每月 amount 一致。）
-      row.amount = round2(row.amount + paid / span);
+      // 用量均摊：所有覆盖月相等（v2.2.13 视觉一致优先）
+      row.usage += avgU;
+      // v2.2.13：amount = 缴费月全额（bill_start 月，v2.2.6 语义）；
+      // amountAvg = 该账单 paid 均摊到覆盖月（物业 246/3=82 每月；水/气同），
+      // 供「中间列/趋势图」用均摊月值展示。
+      if (sY === year && m === sM) row.amount = round2(row.amount + paid);
+      row.amountAvg = round2(row.amountAvg + paid / span);
       if (rec.status === "pending") row.note = "待校正";
     }
   }
+  // 物业费无需档位字段，但保留 cycleType 与 ruleUnit 方便前端展示
   return months;
 }
 

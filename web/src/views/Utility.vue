@@ -57,7 +57,7 @@ const tierClass = (tier) => (tier >= 3 ? "t3" : tier === 2 ? "t2" : "");
 const tierText = (tier) =>
   tier >= 3 ? "第3档" : tier === 2 ? "第2档" : "";
 
-// ---------------- 趋势图（v260908 金额柱+用量折线；v260909 改：物业=金额柱 / 水电气=用量柱 + 档位虚线） ----------------
+// ---------------- 趋势图（v2.2.13：取消档位虚线；物业=金额(均摊)柱 / 水电气=用量柱；柱按行 tier 着色） ----------------
 // 按月视图：当年有账单的月份（按 type 选柱字段）；按年视图：历年汇总
 const chartRows = computed(() =>
   viewMode.value === "year"
@@ -66,59 +66,10 @@ const chartRows = computed(() =>
 );
 const isProperty = computed(() => segType.value === "property");
 const chartUnit = computed(() => curType.value.unit);
-// v260911：跨行找「该类型规则 cycleType」—— by_year 时月视图不画档位虚线
-const rowsCycleType = computed(() => {
-  for (const r of chartRows.value) if (r.cycleType) return r.cycleType;
-  return null;
-});
-// v260911：跨行最大 tier（用于「全年都没超第 2 档时第 3 档虚线不放」）
-const maxTierAcrossRows = computed(() =>
-  chartRows.value.reduce((a, r) => Math.max(a, Number(r.tier) || 0), 0)
-);
-// v260911：跨行最大柱值（物业=amount、其他=usage）
-const maxValueAcrossRows = computed(() => {
-  if (!chartRows.value.length) return 0;
-  return chartRows.value.reduce((a, r) => {
-    const v = isProperty.value ? Number(r.amount || 0) : Number(r.usage || 0);
-    return v > a ? v : a;
-  }, 0);
-});
-// 档位阈值 → markLine 配置
-//   - 物业费无档位 → 不画
-//   - 燃气 by_year 且月模式 → 不画（年累计档位在月模式无意义）
-//   - 全年 maxTier<2 → 第 2 档虚线放顶、第 3 档不画（腾空间给柱状条）
-//   - 其他：按 tierThresholds 全画
-function tierMarkLine() {
-  if (isProperty.value) return undefined;
-  // 燃气 by_year 月模式不画档位虚线
-  if (viewMode.value === "month" && rowsCycleType.value === "by_year") return undefined;
-  const s = new Set();
-  for (const r of chartRows.value) {
-    if (r.tierThresholds) {
-      for (const t of r.tierThresholds) if (t != null) s.add(t);
-    }
-  }
-  if (!s.size) return undefined;
-  const arr = [...s].sort((a, b) => a - b);
-  // maxTierAcrossRows<2：仅画第 2 档虚线（i=0），且 y 放到接近 maxY（腾空间给柱）
-  const topOnly = maxTierAcrossRows.value < 2 && arr.length >= 2;
-  const draw = topOnly ? arr.slice(0, 1) : arr;
-  const topY = Math.ceil(maxValueAcrossRows.value * 1.1) || 1;
-  return {
-    symbol: "none",
-    silent: true,
-    data: draw.map((v, i) => ({
-      yAxis: topOnly ? Math.ceil(topY * 0.95) : v,
-      lineStyle: {
-        type: "dashed",
-        color: i === 0 ? "#f59e0b" : "#ef4444",
-        width: 1,
-      },
-      label: { show: false },
-    })),
-  };
-}
-// v260911：柱按行 tier 着色（物业费统一蓝；水电气 1档=绿 / 2档=橙 / 3档及以上=红）
+// 柱值：物业=amountAvg（均摊月金额，如 3月一交→每月82）；水电气=usage（均摊用量）
+const colValueOf = (r) =>
+  isProperty.value ? Number(r.amountAvg ?? r.amount ?? 0) : Number(r.usage || 0);
+// v2.2.13：柱按行 tier 着色（物业费统一蓝；水电气 1档=绿 / 2档=橙 / 3档及以上=红）
 function barItemStyle(tier) {
   if (isProperty.value) return { color: "#6366f1" };
   const t = Number(tier) || 1;
@@ -132,19 +83,13 @@ const chartOpt = computed(() => {
   const labels = rows.map((r) =>
     viewMode.value === "year" ? r.year + "年" : r.month + "月"
   );
-  // 物业=金额柱；水电气=用量柱
-  const values = rows.map((r) =>
-    isProperty.value ? Number(r.amount || 0) : Number(r.usage || 0)
-  );
-  const mark = tierMarkLine();
-  // v260911：yAxis.max 同时覆盖柱值与档位阈值（如全年都没超 2 档，把第 2 档虚线放到 top）
-  const tierArr = mark ? mark.data.map((d) => d.yAxis) : [];
+  const values = rows.map((r) => colValueOf(r));
   const maxValue = values.length
     ? values.reduce((a, b) => (b > a ? b : a), values[0])
     : 0;
-  const maxTier = tierArr.length ? tierArr.reduce((a, b) => (b > a ? b : a), tierArr[0]) : 0;
-  const yMax = Math.ceil(Math.max(maxValue, maxTier) * 1.1) || 1;
-  // v260911：每根柱按行 tier 着色；echarts 接受 data 为 object[]，每项 { value, itemStyle }
+  // v2.2.13 Y 轴策略：按当前视图最高柱自适应撑满（档位线已取消，无固定参照物；
+  // 固定数值会让小值年份柱子矮得没法看）。max = max(柱值)*1.15。
+  const yMax = Math.ceil(maxValue * 1.15) || 1;
   const data = rows.map((r, i) => ({
     value: values[i],
     itemStyle: { ...barItemStyle(r.tier), borderRadius: [4, 4, 0, 0] },
@@ -155,8 +100,6 @@ const chartOpt = computed(() => {
       type: "bar",
       data,
       barWidth: "38%",
-      // 档位虚线（无档位不画；mark=undefined 时不设）
-      ...(mark ? { markLine: mark } : {}),
     },
   ];
   return {
@@ -166,14 +109,13 @@ const chartOpt = computed(() => {
         const i = ps[0]?.dataIndex ?? 0;
         const r = rows[i];
         let s = `<b>${labels[i]}</b><br/>`;
-        // 物业=只显示金额；水电气=只显示用量（与柱对齐）；不画"金额"列
+        // 物业=均摊月金额；水电气=均摊用量
         if (isProperty.value) {
-          s += `${ps[0].marker} 金额：¥${Number(r.amount || 0).toFixed(2)}`;
+          s += `${ps[0].marker} 金额：¥${Number(colValueOf(r)).toFixed(2)}`;
         } else {
           const u = Number(r.usage || 0);
           s += `${ps[0].marker} 用量：${u} ${chartUnit.value}`;
         }
-        if (r.tier >= 2) s += `<br/><span style="color:${r.tier >= 3 ? "#ef4444" : "#f59e0b"}">● 第${r.tier}档</span>`;
         return s;
       },
     },
@@ -183,14 +125,12 @@ const chartOpt = computed(() => {
       type: "value",
       name: isProperty.value ? "金额(¥)" : `用量(${chartUnit.value})`,
       max: yMax,
-      // v260911：默认 splitLine 太密，关掉（档位虚线已够用）
+      // v2.2.13：无档位虚线 → 也不画 splitLine，保持极简
       splitLine: { show: false },
     },
     series,
   };
 });
-// 数据点告警标注（不参与渲染，仅提示）
-const hasOverTier = computed(() => chartRows.value.some((r) => r.tier >= 2));
 
 async function loadAll() {
   const [r1, r2] = await Promise.all([
@@ -262,6 +202,11 @@ function shiftYear(d) {
 }
 
 function fmtUsage(row) {
+  // v2.2.13：物业无用量 → 中间列显示均摊月金额（paid/span，如 82元/月）；水电气=均摊用量整数
+  if (isProperty.value) {
+    const v = Number(row.amountAvg || 0);
+    return v > 0 ? String(Math.round(v)) : "—";
+  }
   if (row.usage == null || row.usage === 0) return "—";
   return String(Math.round(row.usage)); // 均摊展示整数（用户确认）
 }
@@ -456,7 +401,7 @@ watch(year, refresh);
       <!-- v260909：趋势图（物业=金额柱 / 水电气=用量柱 + 档位虚线） -->
       <div class="card" style="padding: 14px 16px; margin-bottom: 12px" v-if="chartOpt">
         <div class="section-title" style="margin-bottom: 6px">
-          {{ viewMode === "month" ? year + " 年趋势" : "历年趋势" }}（柱={{ isProperty ? "金额" : "用量" }}{{ chartOpt.series[0]?.markLine ? " · 虚线=档位" : "" }}）
+          {{ viewMode === "month" ? year + " 年趋势" : "历年趋势" }}（柱={{ isProperty ? "金额" : "用量" }}）
         </div>
         <EChart :option="chartOpt" height="210px" />
       </div>
@@ -466,7 +411,8 @@ watch(year, refresh);
         <div v-for="y in years" :key="y.year" :class="['month-row', tierClass(y.tier), { off: !y.hasBill }]" @click="y.hasBill && viewYear(y.year)">
           <span class="col-name">{{ y.year }}年</span>
           <!-- v260911：单位始终显示（物业"元"统一占位，避免有的有"元"有的没） -->
-          <span class="col-usage">{{ y.hasBill ? y.usage : "—" }}<em class="unit">{{ curType.unit }}</em></span>
+          <!-- v2.2.13：物业年视图中间列无均摊值可显 → "—"且不带单位（避免"— 元"观感） -->
+          <span class="col-usage">{{ y.hasBill ? fmtUsage(y) : "—" }}<em class="unit" v-if="y.hasBill && fmtUsage(y) !== '—'">{{ curType.unit }}</em></span>
           <span class="col-tier">
             <span v-if="tierText(y.tier)" class="tier-badge" :class="tierClass(y.tier)">{{ tierText(y.tier) }}</span>
             <span v-else class="muted slot">—</span>
@@ -486,7 +432,7 @@ watch(year, refresh);
         >
           <span class="col-name">{{ m.month }}月</span>
           <!-- v260911：单位始终显示（物业"元"统一占位，避免有的有"元"有的没） -->
-          <span class="col-usage">{{ fmtUsage(m) }}<em class="unit">{{ curType.unit }}</em></span>
+          <span class="col-usage">{{ fmtUsage(m) }}<em class="unit" v-if="fmtUsage(m) !== '—'">{{ curType.unit }}</em></span>
           <span class="col-tier">
             <span v-if="tierText(m.tier)" class="tier-badge" :class="tierClass(m.tier)">{{ tierText(m.tier) }}</span>
             <span v-else-if="m.note" class="pend">{{ m.note }}</span>
