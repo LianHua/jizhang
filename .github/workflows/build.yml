@@ -54,6 +54,10 @@ jobs:
         id: ver
         run: echo "APP_VERSION=v$(TZ=Asia/Shanghai date +%y%m%d-%H%M)" >> "$GITHUB_OUTPUT"
 
+      - name: 计算 GHCR 小写仓库名（GHCR 要求全小写，github.repository 含大写会报错）
+        id: ghcr
+        run: echo "REPO=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
       - name: Build and push (amd64 + arm64)
         uses: docker/build-push-action@v6
         with:
@@ -63,8 +67,8 @@ jobs:
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.APP_VERSION }}
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ steps.ver.outputs.APP_VERSION }}
+            ghcr.io/${{ steps.ghcr.outputs.REPO }}:latest
+            ghcr.io/${{ steps.ghcr.outputs.REPO }}:${{ steps.ver.outputs.APP_VERSION }}
           build-args: |
             APP_VERSION=${{ steps.ver.outputs.APP_VERSION }}
           cache-from: type=gha
@@ -86,7 +90,7 @@ jobs:
         run: |
           TAG="${{ steps.ver.outputs.APP_VERSION }}"
           DH="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}"
-          REPO="${{ github.repository }}"
+          REPO="${{ steps.ghcr.outputs.REPO }}"
           PREV=$(git tag --sort=-creatordate | head -1)
           if [ -n "$PREV" ] && [ "$PREV" != "$TAG" ]; then RANGE="$PREV..HEAD"; else RANGE="HEAD"; fi
           LOG=$(git log --no-merges --pretty=format:"- %s" -n 25 "$RANGE")
