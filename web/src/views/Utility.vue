@@ -98,22 +98,30 @@ const chartOpt = computed(() => {
   const labels = rows.map((r) =>
     viewMode.value === "year" ? r.year + "年" : r.month + "月"
   );
-  // 物业=金额柱；水电气=用量柱
-  const values = rows.map((r) =>
-    isProperty.value ? Number(r.amount || 0) : Number(r.usage || 0)
-  );
-  const mark = tierMarkLine();
-  const series = [
-    {
-      name: isProperty.value ? "金额" : "用量",
-      type: "bar",
-      data: values,
-      barWidth: "38%",
-      itemStyle: { color: isProperty.value ? "#6366f1" : "#10b981", borderRadius: [4, 4, 0, 0] },
-      // 档位虚线（无档位不画；mark=undefined 时不设）
-      ...(mark ? { markLine: mark } : {}),
-    },
-  ];
+// 物业=金额柱；水电气=用量柱
+    const values = rows.map((r) =>
+      isProperty.value ? Number(r.amount || 0) : Number(r.usage || 0)
+    );
+    const mark = tierMarkLine();
+    // v260910：yAxis.max 至少覆盖到最大档位阈值（避免档位虚线被裁到图表外看不到）
+    // echarts 默认 dataMax 自动包含 markLine，但显式设更稳
+    const tierArr = mark ? mark.data.map((d) => d.yAxis) : [];
+    const maxValue = values.length
+      ? values.reduce((a, b) => (b > a ? b : a), values[0])
+      : 0;
+    const maxTier = tierArr.length ? tierArr.reduce((a, b) => (b > a ? b : a), tierArr[0]) : 0;
+    const yMax = Math.ceil(Math.max(maxValue, maxTier) * 1.1) || 1;
+    const series = [
+      {
+        name: isProperty.value ? "金额" : "用量",
+        type: "bar",
+        data: values,
+        barWidth: "38%",
+        itemStyle: { color: isProperty.value ? "#6366f1" : "#10b981", borderRadius: [4, 4, 0, 0] },
+        // 档位虚线（无档位不画；mark=undefined 时不设）
+        ...(mark ? { markLine: mark } : {}),
+      },
+    ];
   return {
     tooltip: {
       trigger: "axis",
@@ -137,6 +145,7 @@ const chartOpt = computed(() => {
     yAxis: {
       type: "value",
       name: isProperty.value ? "金额(¥)" : `用量(${chartUnit.value})`,
+      max: yMax,
       splitLine: { lineStyle: { color: "var(--border, #e5e7eb)" } },
     },
     series,
