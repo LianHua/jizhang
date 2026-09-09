@@ -1246,4 +1246,78 @@ export function migrateUtilityAlignV2() {
   );
 }
 
+// =====================================================================
+// 存量校准 V3（v2.2.18 corrected 归位，服务启动时在 V2 之后跑一次）：
+// 背景：V2 只删除重建 auto/pending，corrected/manual 一律保留 → 老引擎时代
+// （v2.2.14 V1 对齐前）生成的错位 corrected 账单被「尊重」冻结：
+//   例：物业 2024-02-03 缴「1～3月」→ 应 Q1=2024-01~03，库里却 2024-02~04；
+//       水费 2024-03-24 缴 → 应 2024-02~03（16-31 → 上月+当月），库里却 2024-03~04。
+//   结果：与相邻正确账单（auto 重建产物）在边界月重叠 → 月视图 amountAvg 双倍
+//   （物业 4 月 164=82+82、水 4 月 116=67.8+48.4）、整额落错月、部分月份缺失。
+// 本迁移：
+//   1) 只处理 status='corrected'（引擎生成后用户校正过金额/用量/优惠 → 区间仍可能是
+//      老引擎错位值；manual=用户手动新建的无流水/自定义账单，一律尊重不动）；
+//   2) 对账单内全部关联流水用「出账窗口→账期」逐一推导覆盖区间——全部一致才归位
+//      （多笔流水跨窗口推导不一致 → 无法唯一确定，跳过保留现状）；
+//   3) 归位仅平移 bill_start/bill_end（span 不变），绝不改 usage/charge/paid/discount/
+//      usage_locked/status——用户对金额/用量的校正完整保留；
+//   4) 目标区间若已被同账本同类型其它账单占用 → 跳过（避免制造重叠）。
+// 幂等：settings 打标 utility_align_v3 只跑一次；归位目标 = 窗口互斥推导，稳定可重放。
+// =====================================================================
+export function migrateUtilityAlignV3() {
+  if (getSetting("utility_align_v3", "") === "1") return;
+  let fixed = 0, skippedNoFlow = 0, skippedAmbiguous = 0, skippedDup = 0, skippedOK = 0;
+  const recs = db
+    .prepare(
+      `SELECT * FROM utility_records
+        WHERE type IN ('water','electric','gas','property') AND status='corrected'`
+    )
+    .all();
+  for (const rec of recs) {
+    const ids = flowIdsOf(rec);
+    if (!ids.length) { skippedNoFlow += 1; continue; }
+    // 逐笔流水推导覆盖区间（出账日窗口 → 账期），收集唯一候选
+    const covSet = new Set();
+    let determinable = true;
+    for (const fid of ids) {
+      const flow = db
+        .prepare("SELECT * FROM flows WHERE id=? AND book_id=?")
+        .get(fid, rec.book_id);
+      if (!flow) continue;
+      const type = kwTypeOf(flow);
+      if (type !== rec.type) continue;
+      const ym = String(flow.flow_time || "").slice(0, 7);
+      if (!/^\d{4}-\d{2}$/.test(ym)) continue;
+      const day = Number(String(flow.flow_time || "").slice(8, 10)) || 1;
+      const { rule, cov } = ruleForFlow(rec.book_id, type, ym, day, flow.category);
+      if (!rule || !cov) { determinable = false; break; }
+      covSet.add(`${cov.start}~${cov.end}`);
+    }
+    if (!determinable || covSet.size !== 1) { skippedAmbiguous += 1; continue; }
+    const [start, end] = [...covSet][0].split("~");
+    const curStart = String(rec.bill_start || "").slice(0, 7);
+    const curEnd = String(rec.bill_end || "").slice(0, 7);
+    if (curStart === start && curEnd === end) { skippedOK += 1; continue; }
+    // 目标区间已被同账本同类型其它账单占用 → 跳过（不制造重叠）
+    const dup = db
+      .prepare(
+        `SELECT id FROM utility_records WHERE book_id=? AND type=? AND bill_start=? AND bill_end=? AND id<>? LIMIT 1`
+      )
+      .get(rec.book_id, rec.type, start, end, rec.id);
+    if (dup) { skippedDup += 1; continue; }
+    db.prepare(
+      `UPDATE utility_records SET bill_start=?, bill_end=?, updated_at=datetime('now','localtime') WHERE id=?`
+    ).run(start, end, rec.id);
+    fixed += 1;
+    console.log(
+      `[utility-migrate] v3 归位 corrected 账单 #${rec.id} ${rec.type} ${curStart}~${curEnd} → ${start}~${end}`
+    );
+  }
+  setSetting("utility_align_v3", "1");
+  console.log(
+    `[utility-migrate] v2.2.18 corrected 区间归位完成：修正 ${fixed} 条、` +
+      `跳过（无流水 ${skippedNoFlow}/推导不定 ${skippedAmbiguous}/区间占用 ${skippedDup}/已正确 ${skippedOK}）`
+  );
+}
+
 export default r;

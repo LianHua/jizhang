@@ -20,7 +20,7 @@ import savingsRoutes from "./routes/savings.js";
 import walletRoutes from "./routes/wallets.js";
 import syncRoutes from "./routes/sync.js";
 import merchantRoutes from "./routes/merchants.js";
-import utilityRoutes, { migrateUtilityAlignV1, migrateUtilityAlignV2 } from "./routes/utility.js";
+import utilityRoutes, { migrateUtilityAlignV1, migrateUtilityAlignV2, migrateUtilityAlignV3 } from "./routes/utility.js";
 import { logOp } from "./oplog.js";
 import oplogRoutes from "./oplog.js";
 import { generateDueRecurring } from "./lib/recurring.js";
@@ -63,6 +63,16 @@ try {
   migrateUtilityAlignV2();
 } catch (e) {
   console.warn("[utility-migrate] v2.2.17 显式账期校准失败:", e.message);
+}
+
+// 存量校准 V3（v2.2.18）：corrected 历史账单区间归位——V2 尊重 corrected 保留，
+// 但老引擎时代的错位 corrected（如物业 2024-02 缴却记 02~04）与 auto 重建账单
+// 在边界月重叠 → 月视图 amountAvg 双倍。本迁移按流水推导唯一区间后仅平移
+// bill_start/bill_end（保留用户对金额/用量的校正）。须在 V2 之后跑。
+try {
+  migrateUtilityAlignV3();
+} catch (e) {
+  console.warn("[utility-migrate] v2.2.18 corrected 区间归位失败:", e.message);
 }
 
 // 存量流水 updated_at 回填：历史 bug 使定期记账生成的流水漏写 updated_at（NULL），
