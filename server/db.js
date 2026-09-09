@@ -400,6 +400,7 @@ CREATE TABLE IF NOT EXISTS utility_rules (
   season_json   TEXT,                       -- 仅电：{"months":[5,6,7,8,9,10],"tiers":[{...}]} 夏季档；null=无季节切换（非夏季用 tiers_json）
   monthly_fee   REAL,                       -- 仅物业：每月固定费用（无阶梯时用）；tiers_json 可留 [{"cap":null,"price":<monthly_fee>}]
   category      TEXT NOT NULL DEFAULT '住房', -- 关联的消费分类（识别口径：流水分类=该值 + 名称含关键词）；默认住房兼容老规则
+  cover_json    TEXT,                       -- v2.2.17 出账窗口→覆盖账期映射（显式账期，取代奇偶月猜块）；见 server/routes/utility.js defaultCover
   remark        TEXT NOT NULL DEFAULT '',
   created_at    TEXT NOT NULL DEFAULT (datetime('now','localtime')),
   updated_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
@@ -414,6 +415,8 @@ addColumnIfMissing(
   "category",
   "category TEXT NOT NULL DEFAULT '住房'"
 );
+// v2.2.17：显式覆盖账期配置（出账日窗口 → 账期偏移）。老规则该列为 NULL → 读取端按类型默认语义兜底。
+addColumnIfMissing("utility_rules", "cover_json", "cover_json TEXT");
 
 db.exec(`
 -- 账单记录表：一条 = 一次缴费账单（覆盖 N 个月）。一笔缴费可关联多笔流水

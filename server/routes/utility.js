@@ -38,13 +38,14 @@ const monthSpan = (a, b) => {
 
 // 识别一笔流水属于哪类水电气（名称含关键词 → 类型）；不命中返回 null
 // v260908：分类不再硬编码「住房」——规则可绑定任意消费分类，分类匹配下沉到
-// pickRule(cat)，由「该类型在当月生效的规则里 category 是否等于流水分类」决定是否计入。
+// ruleForFlow(cat)，由「该类型规则里 category 是否等于流水分类」决定是否计入。
+// v2.2.17：规则段按「覆盖账期是否落在规则账期窗口」匹配（见 ruleForFlow / ruleMatchesCov）。
 export function matchUtilityType(flow) {
   if (!flow || flow.type !== "expense") return null;
   return kwTypeOf(flow);
 }
 
-// 关键词 → 类型（不含分类判断；分类判断在 pickRule 按规则绑定分类精确匹配）
+// 关键词 → 类型（不含分类判断；分类判断在 ruleForFlow 按规则绑定分类精确匹配）
 function kwTypeOf(flow) {
   const desc = String(flow.description || "");
   for (const { kw, type } of KW_ORDER) {
@@ -64,22 +65,8 @@ function ruleCategory(rule) {
   return String(rule?.category || HOUSE_CAT).trim() || HOUSE_CAT;
 }
 
-// 取该类型在 ym（'YYYY-MM'）生效、且绑定分类=cat 的规则段；
-// 无生效段（含规则生效日期之前 / 该分类没有规则）返回 null
-function pickRule(bookId, type, ym, cat) {
-  const c = String(cat || "").trim() || HOUSE_CAT;
-  const rows = db
-    .prepare(
-      `SELECT * FROM utility_rules WHERE book_id=? AND type=? AND category=?
-         AND effective_from <= ? AND (effective_to IS NULL OR effective_to >= ?)
-         ORDER BY effective_from DESC LIMIT 1`
-    )
-    .all(bookId, type, c, ym, ym);
-  return rows[0] || null;
-}
-
-// 取该类型在 ym 生效的任一规则（不区分分类，取最新生效段）；
-// 手动添加账单等无流水上下文时使用
+// 取该类型在 ym（'YYYY-MM'，覆盖首月口径）生效的任一规则（不区分分类，取最新生效段）；
+// 手动添加账单（bill_start=覆盖首月）等无流水日上下文时使用
 function pickRuleAny(bookId, type, ym) {
   const rows = db
     .prepare(
@@ -91,14 +78,12 @@ function pickRuleAny(bookId, type, ym) {
   return rows[0] || null;
 }
 
-// 该 type 在 ym 是否“存在任意生效规则”（用于判定流水是否因换分类/规则集变更而不再匹配）
-function hasAnyRule(bookId, type, ym) {
+// 该 type 是否“存在任意规则”（v2.2.17：不再按月判断——规则删光才算没有；
+// 用于判定流水是否因换分类/规则集变更而不再匹配 → 从旧账单摘除）
+function hasAnyRule(bookId, type) {
   const r = db
-    .prepare(
-      `SELECT 1 FROM utility_rules WHERE book_id=? AND type=?
-         AND effective_from <= ? AND (effective_to IS NULL OR effective_to >= ?) LIMIT 1`
-    )
-    .get(bookId, type, ym, ym);
+    .prepare("SELECT 1 FROM utility_rules WHERE book_id=? AND type=? LIMIT 1")
+    .get(bookId, type);
   return !!r;
 }
 
@@ -228,19 +213,28 @@ function gasTierByMoney(totalMoney, tiers) {
   return tiers.length || 1;
 }
 
-// 该类型当年（缴费自然年）按「规则绑定分类」口径的流水金额合计 —— 燃气年累计
-// v260908：category 按生成该账单的规则绑定分类过滤（不同分类各自独立年累计）
-function annualPaidOf(bookId, type, year, cat) {
-  const kw = kwOf(type);
-  const c = String(cat || "").trim() || HOUSE_CAT;
-  const r = db
+// 燃气 by_year 年累计口径（v2.2.17 改）：账期末月所在年（bill_end）+ 同规则分类的
+// 燃气账单 paid 合计（排除自己）。覆盖区间与缴费月解耦后，1-15 上旬缴的跨年账单
+//（2026-01 缴 → 覆盖 2025-11~12）按账期末月 2025-12 计入 2025 年累计，金额跟随
+// 实际用量所在年——不再按「缴费自然年」用流水关键词扫（旧口径会把 2026-01 的缴费
+// 算进 2026 年累计，与真实用量年错位）。其余账单自身即费用事实，直接读表更稳。
+function gasYearOthersOf(bookId, rec, year) {
+  let cat = HOUSE_CAT;
+  if (rec.rule_id) {
+    const rule = db.prepare("SELECT * FROM utility_rules WHERE id=?").get(rec.rule_id);
+    if (rule) cat = ruleCategory(rule);
+  }
+  const rows = db
     .prepare(
-      `SELECT COALESCE(SUM(amount),0) t FROM flows
-        WHERE book_id=? AND type='expense' AND category=?
-          AND flow_time>=? AND flow_time<? AND description LIKE ?`
+      `SELECT ur.id, ur.paid FROM utility_records ur
+         JOIN utility_rules rul ON rul.id = ur.rule_id
+        WHERE ur.book_id=? AND ur.type='gas' AND rul.category=?
+          AND substr(ur.bill_end,1,4)=?`
     )
-    .get(bookId, c, `${year}-01-01`, `${year + 1}-01-01`, `%${kw}%`);
-  return Number(r.t) || 0;
+    .all(bookId, cat, String(year));
+  let t = 0;
+  for (const row of rows) if (Number(row.id) !== Number(rec.id)) t += Number(row.paid) || 0;
+  return round2(t);
 }
 
 function flowIdsOf(rec) {
@@ -284,16 +278,114 @@ function spanOfRule(rule) {
   return Math.max(1, Number(rule?.bill_span) || 1);
 }
 
-// 账单覆盖区间由「缴费月」按规则块对齐推导（v2.2.14 第5轮定论，与展示模型配套：
-// 用量归覆盖月（双月各半）、金额归真实缴费月）：
-//   electric(span1)         → 覆盖 = 缴费月
-//   water(span2, 单月出账)  → 出账覆盖「本月+上月」：缴费奇数月 M → [M-1, M]；
-//                             缴费月偶数（迟缴上月账）→ 归到前一块（末=上月奇数月）
-//   gas(span2, 双月出账)    → 出的是前面 2 个月的量：缴费偶数月 M → [M-2, M-1]；
-//                             缴费月奇数（迟缴）→ 归到前一块（末=缴月-2）
-//   物业(span3)             → 缴费时间不定，对齐自然季度（1/4/7/10 起）：缴费月所在季
-// 双月/季度账单与缴费月解耦后，流水月可能落在覆盖区间外（燃气缴 2026-02 → 覆盖
-// 2025-12~2026-01）；金额展示由 computeMonths 按 payMonthOf 另行锚定。
+// =====================================================================
+// v2.2.17 显式账期模型（用户 2026-09-11 拍板，取代 v2.2.14 的奇偶月猜块）：
+// 规则上写明「出账日窗口 → 覆盖账期」映射 cover_json.windows；流水按自身日号命中
+// 唯一窗口 → 得到唯一覆盖区间 bill_start~bill_end，杜绝「一笔流水生成 2 张账单」。
+//   水费/燃气：上旬中旬(1-15)缴 → 覆盖 M-2~M-1（上月+上上月）
+//              下旬(16-31)缴 → 覆盖 M-1~M（当月+上月）     （M=流水月，两条件互斥）
+//   电费：任意日（每月一缴）→ 覆盖 M-1（上月，单月）
+//   物业：季度缴 → 缴费月所在自然季度（季内任一天都归该季）
+// 规则 effective_from/effective_to 语义改为「起始账期/结束账期」（首个/末个被覆盖月份）：
+// 匹配对象是账单覆盖区间而非流水月——水费选 2024-02 起 → 首期覆盖 2024-02~03、
+// 首笔流水 2024-03 下旬；电费选 2024-02 起 → 首期用量 2024-02、首笔流水 2024-03。
+// cover_json 结构：{ "windows": [ {from,to,start,span,quarter?}, ... ] }
+//   from/to = 流水日号窗口（含，需划分 1~31 且互斥，一天只命中一个）；
+//   start   = 覆盖起始月偏移（0=当月，-1=上月，-2=上上月）；
+//   span    = 覆盖月数；quarter=true（物业季度）时忽略 start，直接取缴费月所在自然季度。
+// =====================================================================
+function defaultCover(type, span) {
+  const sp = Math.max(1, Number(span) || 1);
+  if (type === "electric") return { windows: [{ from: 1, to: 31, start: -1, span: 1 }] };
+  if (type === "water" || type === "gas") {
+    return {
+      windows: [
+        { from: 1, to: 15, start: -2, span: 2 },
+        { from: 16, to: 31, start: -1, span: 2 },
+      ],
+    };
+  }
+  // property：季度缴 = 缴费月所在自然季度；span<=1 = 缴当月
+  if (sp <= 1) return { windows: [{ from: 1, to: 31, start: 0, span: 1 }] };
+  if (sp === 3) return { windows: [{ from: 1, to: 31, start: 0, span: 3, quarter: true }] };
+  return { windows: [{ from: 1, to: 31, start: 0, span: sp }] };
+}
+function parseCover(rule) {
+  if (rule && rule.cover_json) {
+    try {
+      const o = JSON.parse(rule.cover_json);
+      if (o && Array.isArray(o.windows) && o.windows.length) return o;
+    } catch {
+      /* 损坏则退回默认 */
+    }
+  }
+  return defaultCover(rule?.type, rule?.bill_span);
+}
+// 流水（ym='YYYY-MM'，day=日号）→ 该规则出账窗口命中的覆盖区间；无命中窗口返回 null
+function coverageOfRule(rule, ym, day) {
+  if (!/^\d{4}-\d{2}$/.test(String(ym || ""))) return null;
+  const cover = parseCover(rule);
+  const m = Number(String(ym).split("-")[1]);
+  const d = Number(day) || 1;
+  const win = (cover.windows || []).find(
+    (w) => d >= (Number(w.from) || 1) && d <= (Number(w.to) || 31)
+  );
+  if (!win) return null;
+  const span = Math.max(1, Number(win.span) || Number(rule?.bill_span) || 1);
+  if (win.quarter) {
+    const back = (m - 1) % 3; // 回退到自然季度首月（0/1/2）
+    const start = ymAdd(ym, -back);
+    return { start, end: ymAdd(start, span - 1) };
+  }
+  const start = ymAdd(ym, Number(win.start) || 0);
+  return { start, end: ymAdd(start, span - 1) };
+}
+// 规则是否覆盖该账单区间：EF=起始账期 <= 覆盖首月；ET=结束账期（如有）>= 覆盖末月
+function ruleMatchesCov(rule, cov) {
+  const ef = String(rule?.effective_from || "").slice(0, 7);
+  if (!/^\d{4}-\d{2}$/.test(ef)) return false;
+  if (String(cov?.start || "").slice(0, 7) < ef) return false;
+  const et = rule.effective_to ? String(rule.effective_to).slice(0, 7) : null;
+  if (et && String(cov?.end || "").slice(0, 7) > et) return false;
+  return true;
+}
+// 流水 → 命中规则：按「出账窗口→账期」逐个候选（分类精确匹配，最新生效段优先）
+function ruleForFlow(bookId, type, ym, day, cat) {
+  const c = String(cat || "").trim() || HOUSE_CAT;
+  const rules = db
+    .prepare(
+      `SELECT * FROM utility_rules WHERE book_id=? AND type=? AND category=?
+         ORDER BY effective_from DESC`
+    )
+    .all(bookId, type, c);
+  for (const rule of rules) {
+    const cov = coverageOfRule(rule, ym, day);
+    if (!cov) continue;
+    if (!ruleMatchesCov(rule, cov)) continue;
+    return { rule, cov };
+  }
+  return { rule: null, cov: null };
+}
+// 按覆盖区间找生效规则（不限分类）——手动补账单 / 规则被删后重算的兜底
+function ruleForSpanAny(bookId, type, bStart, bEnd) {
+  const rules = db
+    .prepare(
+      `SELECT * FROM utility_rules WHERE book_id=? AND type=?
+         ORDER BY effective_from DESC`
+    )
+    .all(bookId, type);
+  for (const rule of rules) {
+    const cov = { start: String(bStart || "").slice(0, 7), end: String(bEnd || "").slice(0, 7) };
+    if (!/^\d{4}-\d{2}$/.test(cov.start)) continue;
+    if (!ruleMatchesCov(rule, cov)) continue;
+    return rule;
+  }
+  return null;
+}
+
+// ⚠️ 以下 alignBillBlock 仅保留给已发布的 v2.2.14 存量校准 migrateUtilityAlignV1 使用
+//（老库早已打过标不会再跑；全新库无 auto 账单可对齐，无副作用）。
+// 新账期一律走上面的 cover_json 机制，不再用奇偶月猜块。
 function alignBillBlock(type, ym, rule) {
   const span = spanOfRule(rule);
   const m = Number(String(ym || "").split("-")[1]);
@@ -318,8 +410,8 @@ function alignBillBlock(type, ym, rule) {
 // force=true：用户主动校正（补优惠/改用量）时即使 usage_locked 也重算用量与 charge；
 // force=false（自动合并路径）：usage_locked 的账单只更新 paid，不覆盖用户手改的量/价。
 function recomputeRecord(bookId, rec, rule, force) {
-  // 规则被删除后账单仍要可重算：兜底取该类型当月生效的最新规则（可能仍为 null）
-  if (!rule) rule = pickRuleAny(bookId, rec.type, rec.bill_start);
+  // 规则被删除后账单仍要可重算：兜底按「覆盖区间」取该类型最新生效段（可能仍为 null）
+  if (!rule) rule = ruleForSpanAny(bookId, rec.type, rec.bill_start, rec.bill_end);
   const ids = flowIdsOf(rec);
   const paid = paidOfFlows(bookId, ids);
   const discount = Number(rec.discount) || 0;
@@ -344,18 +436,16 @@ function recomputeRecord(bookId, rec, rule, force) {
     tier = 1;
     usageTotal = null;
   } else if (rule?.cycle_type === "by_year") {
-    // 燃气：年累计。paidBefore = 当年总额 − 本账单总额（按规则绑定分类的年累计口径）。
-    // 年份锚「缴费自然年」（真实缴费月，payMonthOf）——覆盖块可跨年
-    // （缴 2026-02 → 覆盖 2025-12~2026-01，金额计入 2026 年累计）。
-    const payYm = payMonthOf(bookId, rec) || rec.bill_start;
-    const year = Number(String(payYm).slice(0, 4));
-    const annual = annualPaidOf(bookId, rec.type, year, ruleCategory(rule));
-    const paidBefore = Math.max(0, round2(annual - paid));
+    // 燃气：年累计按「账期末月所在年」（v2.2.17，金额跟随实际用量年——1-15 上旬缴
+    // 的跨年账单如 2026-01 缴 → 覆盖 2025-11~12，按 2025 累计；16-31 下旬缴同月账期，
+    // 无跨年）。paidBefore = 同年同分类其它账单 paid 合计（不含本单）。
+    const year = Number(String(rec.bill_end || rec.bill_start).slice(0, 4));
+    const paidBefore = gasYearOthersOf(bookId, rec, year);
     const tiers = parseTiers(rule);
     usageTotal = gasBreakdown(round2(paid + discount), paidBefore, tiers);
     // 本期用量不再二次正向验算（反推按年累计扣出，天然自洽）；charge 取实付+优惠
     charge = round2(paid + discount);
-    tier = gasTierByMoney(round2(annual + discount), tiers);
+    tier = gasTierByMoney(round2(paidBefore + paid + discount), tiers);
   } else {
     // 水/电：反向阶梯 + 正向验算
     const tiers = effTiers(rule, rec.bill_start);
@@ -382,6 +472,8 @@ function recomputeRecord(bookId, rec, rule, force) {
 
 // 幂等生成：按流水当前值重建/并入账单。
 // 编辑（改名/改金额/改时间/换分类）后再次调用即可自动纠正旧账单。
+// v2.2.17：覆盖区间由规则「出账窗口→账期」（cover_json）按流水日号推导，不再奇偶猜块；
+// 规则匹配 = 覆盖区间落在规则账期窗口（EF=起始账期 ≤ 覆盖首月，ET=结束账期 ≥ 覆盖末月）。
 // opts.preserveOnNoRule=true（扫描历史）：流水不再匹配任何规则时保留原账单，防误删存量。
 export function utilitySyncFlowById(bookId, flowId, opts = {}) {
   const preserveOnNoRule = !!opts.preserveOnNoRule;
@@ -396,55 +488,85 @@ export function utilitySyncFlowById(bookId, flowId, opts = {}) {
     utilityRemoveFlowById(bookId, flowId);
     return;
   }
-  // v260908：按「规则绑定分类」精确匹配（老规则默认住房 → 老行为不变）
-  const rule = pickRule(bookId, type, ym, flow.category);
+  const day = Number(String(flow.flow_time || "").slice(8, 10)) || 1;
+  const { rule, cov } = ruleForFlow(bookId, type, ym, day, flow.category);
   if (!rule) {
-    // 规则生效日期之前 / 该分类没有规则 → 不计入。
-    // 若该类型当月仍存在其他分类的生效规则（说明用户把这笔记到了别的分类，
-    // 编辑触发时从旧账单摘除）；scan 场景保留原账单（幂等保底，防误删存量）。
-    if (!preserveOnNoRule && hasAnyRule(bookId, type, ym)) {
+    // 规则起始账期之前 / 该分类没有规则 / 出账窗口未命中 → 不计入。
+    // 若该类型仍存在其它规则（说明用户把这笔记到了别的分类，编辑触发时从旧账单摘除）；
+    // scan 场景保留原账单（幂等保底，防误删存量）。
+    if (!preserveOnNoRule && hasAnyRule(bookId, type)) {
       utilityRemoveFlowById(bookId, flowId);
     }
     return;
   }
-  // v2.2.14：账单覆盖区间按「规则块」对齐推导（水单月→本月+上月；气双月→前 2 个月；
-  // 物业→自然季度），不再用「缴费月 + span-1」顺推（那会把覆盖区间整体错位 +1 月，
-  // 如 2026-02-05 缴燃气 → 正确覆盖 2025-12~2026-01，旧逻辑却记成 2026-01~02）。
-  const { start: bStart, end: bEnd } = alignBillBlock(type, ym, rule);
+  const bStart = cov.start;
+  const bEnd = cov.end;
 
-  // v260908 双月账单错位修复：队友分拆支付的尾款若落在相邻月（双月账单 8/25 付一笔、
-  // 9/2 再付一笔），老逻辑按各自支付月各生成一张错位账单 → 均摊金额一月多一月少。
-  // 现优先并入「同类型 + 覆盖本月的现有账单」；无覆盖才按支付月新建账单。
-  let rec = db
-    .prepare(
-      `SELECT * FROM utility_records WHERE book_id=? AND type=? AND bill_start<=? AND bill_end>=?
-         ORDER BY bill_start LIMIT 1`
-    )
-    .get(bookId, type, ym, ym);
-  if (!rec) {
-    rec = db
+  // 先处理该流水当前所在的历史账单：
+  //  - 同覆盖区间 → 保留为目标账单（队友分拆支付并入同一张）；
+  //  - 区间不同且引擎账单（auto/pending）→ 摘除（归属强制纠正，v2.2.17 根修：老引擎
+  //    把区间摆错位后只 append 不纠正 → 双月账单一月多一月少）；
+  //  - 区间不同但 manual/corrected → 尊重用户校正：流水留在该账单，不再新建自动账单。
+  const holders = db
+    .prepare("SELECT * FROM utility_records WHERE book_id=? AND type=?")
+    .all(bookId, type)
+    .filter((x) => flowIdsOf(x).includes(Number(flowId)));
+  let target = null;
+  for (const h of holders) {
+    if (
+      String(h.bill_start).slice(0, 7) === bStart &&
+      String(h.bill_end).slice(0, 7) === bEnd
+    ) {
+      target = h;
+      continue;
+    }
+    if (h.status === "auto" || h.status === "pending") {
+      const ids = flowIdsOf(h).filter((x) => x !== Number(flowId));
+      if (!ids.length) {
+        db.prepare("DELETE FROM utility_records WHERE id=?").run(h.id);
+      } else {
+        db.prepare(
+          `UPDATE utility_records SET flow_ids=?, updated_at=datetime('now','localtime') WHERE id=?`
+        ).run(JSON.stringify(ids), h.id);
+        recomputeRecord(bookId, { ...h, flow_ids: JSON.stringify(ids) }, rule, false);
+      }
+    } else {
+      // manual/corrected：该账单归用户所有，归属不动；仅刷新 paid 后返回，避免复制一张
+      recomputeRecord(bookId, h, rule, false);
+      return;
+    }
+  }
+  if (target) {
+    const ids = flowIdsOf(target);
+    if (!ids.includes(Number(flowId))) ids.push(Number(flowId));
+    db.prepare(
+      `UPDATE utility_records SET flow_ids=?, updated_at=datetime('now','localtime') WHERE id=?`
+    ).run(JSON.stringify(ids), target.id);
+    target = { ...target, flow_ids: JSON.stringify(ids) };
+  } else {
+    const exists = db
       .prepare(
         `SELECT * FROM utility_records WHERE book_id=? AND type=? AND bill_start=? AND bill_end=?`
       )
       .get(bookId, type, bStart, bEnd);
+    if (exists) {
+      const ids = flowIdsOf(exists);
+      if (!ids.includes(Number(flowId))) ids.push(Number(flowId));
+      db.prepare(
+        `UPDATE utility_records SET flow_ids=?, updated_at=datetime('now','localtime') WHERE id=?`
+      ).run(JSON.stringify(ids), exists.id);
+      target = { ...exists, flow_ids: JSON.stringify(ids) };
+    } else {
+      const info = db
+        .prepare(
+          `INSERT INTO utility_records (book_id,type,rule_id,bill_start,bill_end,flow_ids,paid,status)
+           VALUES (?,?,?,?,?,?,0,'auto')`
+        )
+        .run(bookId, type, rule.id, bStart, bEnd, JSON.stringify([Number(flowId)]));
+      target = db.prepare("SELECT * FROM utility_records WHERE id=?").get(info.lastInsertRowid);
+    }
   }
-  if (rec) {
-    const ids = flowIdsOf(rec);
-    if (!ids.includes(Number(flowId))) ids.push(Number(flowId));
-    db.prepare(
-      `UPDATE utility_records SET flow_ids=?, updated_at=datetime('now','localtime') WHERE id=?`
-    ).run(JSON.stringify(ids), rec.id);
-    rec = { ...rec, flow_ids: JSON.stringify(ids) };
-  } else {
-    const info = db
-      .prepare(
-        `INSERT INTO utility_records (book_id,type,rule_id,bill_start,bill_end,flow_ids,paid,status)
-         VALUES (?,?,?,?,?,?,0,'auto')`
-      )
-      .run(bookId, type, rule.id, bStart, bEnd, JSON.stringify([Number(flowId)]));
-    rec = db.prepare("SELECT * FROM utility_records WHERE id=?").get(info.lastInsertRowid);
-  }
-  recomputeRecord(bookId, rec, rule, false);
+  recomputeRecord(bookId, target, rule, false);
 }
 
 // 流水删除/失效时从所有账单解绑；账单空则删除，否则重算
@@ -487,7 +609,36 @@ function decorate(bookId, rec) {
   return { ...rec, flow_ids: ids, flows };
 }
 function decorateRule(rule) {
-  return { ...rule, tiers: parseTiers(rule), season: parseSeason(rule) };
+  return {
+    ...rule,
+    tiers: parseTiers(rule),
+    season: parseSeason(rule),
+    cover: parseCover(rule), // v2.2.17 显式账期；老规则无 cover_json → 按类型默认语义
+  };
+}
+
+// 校验/规整前端提交的 cover（缺省/非法 → 该类型默认账期语义）
+function normCoverInput(type, cover, span) {
+  if (cover && Array.isArray(cover.windows) && cover.windows.length) {
+    const wins = [];
+    for (const w of cover.windows) {
+      const from = Number(w.from);
+      const to = Number(w.to);
+      const start = Number(w.start);
+      const spanW = Math.max(1, Number(w.span) || 1);
+      if (!(from >= 1 && to >= from && to <= 31)) return null;
+      if (spanW > 36) return null;
+      wins.push({
+        from,
+        to,
+        start: Number.isFinite(start) ? start : 0,
+        span: spanW,
+        ...(w.quarter ? { quarter: true } : {}),
+      });
+    }
+    return { windows: wins };
+  }
+  return defaultCover(type, span);
 }
 
 const r = Router();
@@ -515,19 +666,22 @@ r.post(
     if (!UTILITY_TYPES.includes(type))
       return res.status(400).json({ error: "类型不正确" });
     if (!/^\d{4}-\d{2}$/.test(String(b.effective_from || "")))
-      return res.status(400).json({ error: "生效月份格式应为 YYYY-MM" });
+      return res.status(400).json({ error: "起始账期格式应为 YYYY-MM" });
     if (b.effective_to && !/^\d{4}-\d{2}$/.test(String(b.effective_to)))
-      return res.status(400).json({ error: "结束月份格式应为 YYYY-MM" });
+      return res.status(400).json({ error: "结束账期格式应为 YYYY-MM" });
     const tiers = Array.isArray(b.tiers) && b.tiers.length ? b.tiers : null;
     if (!tiers) return res.status(400).json({ error: "至少需要一个档位" });
     const span = Math.max(1, Number(b.bill_span) || 1);
     // v260908：规则可绑定任意消费分类（识别口径=规则分类+名称关键词）；默认住房
     const category = String(b.category || "").trim() || HOUSE_CAT;
+    // v2.2.17：出账窗口→覆盖账期显式配置（缺省按类型默认）
+    const cover = normCoverInput(type, b.cover, span);
+    if (!cover) return res.status(400).json({ error: "出账窗口配置不正确" });
     const info = db
       .prepare(
         `INSERT INTO utility_rules
-           (book_id,type,name,category,effective_from,effective_to,bill_span,cycle_type,unit,tiers_json,season_json,monthly_fee,remark)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+           (book_id,type,name,category,effective_from,effective_to,bill_span,cycle_type,unit,tiers_json,season_json,monthly_fee,cover_json,remark)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
       )
       .run(
         req.bookId,
@@ -542,6 +696,7 @@ r.post(
         JSON.stringify(tiers),
         b.season ? JSON.stringify(b.season) : null,
         b.monthly_fee ? Number(b.monthly_fee) : null,
+        JSON.stringify(cover),
         String(b.remark || "")
       );
     res.json({ id: Number(info.lastInsertRowid) });
@@ -558,26 +713,33 @@ r.put(
     if (!cur) return res.status(404).json({ error: "规则不存在" });
     const b = req.body || {};
     if (b.effective_from !== undefined && !/^\d{4}-\d{2}$/.test(String(b.effective_from)))
-      return res.status(400).json({ error: "生效月份格式应为 YYYY-MM" });
+      return res.status(400).json({ error: "起始账期格式应为 YYYY-MM" });
     if (b.effective_to !== undefined && b.effective_to && !/^\d{4}-\d{2}$/.test(String(b.effective_to)))
-      return res.status(400).json({ error: "结束月份格式应为 YYYY-MM" });
+      return res.status(400).json({ error: "结束账期格式应为 YYYY-MM" });
     const tiers = b.tiers !== undefined ? (Array.isArray(b.tiers) && b.tiers.length ? b.tiers : null) : null;
     if (b.tiers !== undefined && !tiers) return res.status(400).json({ error: "至少需要一个档位" });
+    const nextSpan = Math.max(1, Number(b.bill_span ?? cur.bill_span) || 1);
+    // v2.2.17：cover 显式传入才覆盖（null/缺省保留原值；想重置默认可传 {windows: []}）
+    const cover =
+      b.cover !== undefined ? normCoverInput(cur.type, b.cover, nextSpan) : null;
+    if (b.cover !== undefined && !cover)
+      return res.status(400).json({ error: "出账窗口配置不正确" });
     db.prepare(
       `UPDATE utility_rules SET name=?, category=?, effective_from=?, effective_to=?, bill_span=?,
-              cycle_type=?, unit=?, tiers_json=?, season_json=?, monthly_fee=?, remark=?,
+              cycle_type=?, unit=?, tiers_json=?, season_json=?, monthly_fee=?, cover_json=?, remark=?,
               updated_at=datetime('now','localtime') WHERE id=?`
     ).run(
       b.name !== undefined ? String(b.name) : cur.name,
       b.category !== undefined ? (String(b.category).trim() || HOUSE_CAT) : ruleCategory(cur),
       b.effective_from !== undefined ? b.effective_from : cur.effective_from,
       b.effective_to !== undefined ? (b.effective_to || null) : cur.effective_to,
-      Math.max(1, Number(b.bill_span ?? cur.bill_span) || 1),
+      nextSpan,
       b.cycle_type !== undefined ? String(b.cycle_type) : cur.cycle_type,
       b.unit !== undefined ? String(b.unit) : cur.unit,
       tiers ? JSON.stringify(tiers) : cur.tiers_json,
       b.season !== undefined ? (b.season ? JSON.stringify(b.season) : null) : cur.season_json,
       b.monthly_fee !== undefined ? (b.monthly_fee ? Number(b.monthly_fee) : null) : cur.monthly_fee,
+      b.cover !== undefined ? JSON.stringify(cover) : cur.cover_json,
       b.remark !== undefined ? String(b.remark) : cur.remark,
       cur.id
     );
@@ -775,22 +937,44 @@ r.post(
   })
 );
 
+// 物业应收月费（中间列/趋势图均摊值，v2.2.16）：
+// 物业费每月固定 → 中间列按「规则 monthly_fee」逐月展示应收（用户明确：就按 82 平摊）；
+// 支付有优惠时实付 < 应收，优惠只体现在右列实付，月费列不变。
+// 规则缺失/无 monthly_fee 的旧账单退回 charge/span（应缴均摊），再退回 paid/span，
+// 保证历史数据不出现 0。
+function propertyFeeOf(bookId, rec, span, paid) {
+  const rule = rec.rule_id
+    ? db.prepare("SELECT * FROM utility_rules WHERE id=?").get(rec.rule_id)
+    : null;
+  const monthly = Number(rule?.monthly_fee) || 0;
+  if (monthly > 0) return monthly;
+  const charge = Number(rec.charge) || 0;
+  if (charge > 0 && span > 0) return round2(charge / span);
+  return span > 0 ? round2(paid / span) : 0;
+}
+
 // ---------------- 月度视图（按月看：某年 12 个月） ----------------
-// v2.2.14 语义（用户 2026-09-10 第 5 轮定论，覆盖区间与缴费月解耦后）：
+// v2.2.17 语义（用户 2026-09-11 拍板，账单区间=显式覆盖账期，与缴费月彻底解耦）：
 //  - 用量归「覆盖月」：avgU = Math.round(totalU/span)，所有覆盖月都 +avgU
 //    （双月完全一致，余数不补偿；视觉一致优先，月度 Σusage 可能 ±1 个单位）。
-//  - 金额归「真实缴费月」（payMonthOf = 首笔流水月）：paid 全额累加在缴费月（右列），
-//    覆盖的其余月金额为 0。缴费月可能不在覆盖区间内（燃气缴 2026-02 → 覆盖
-//    2025-12~2026-01，金额显示在 2026-02）。
-//  - amountAvg = paid 均摊到覆盖月（物业 246/3=82 每月；供中间列/趋势图用）。
-//  - 取消下发 tierThresholds：用户要求趋势图不再画档位虚线。
+//  - 金额（右列）整额放「账期末月」= bill_end（覆盖区间的最后一个月，v2.2.17 改：
+//    不再放缴费月）。电费单月账期 → 金额=用量月；水/气双月 → 放账期末月（如 3/24 缴
+//    覆盖 2~3 月 → 放 3 月）；物业季度 → 放季末月 3/6/9/12。
+//  - amountAvg（中间列/趋势图）：水/电/气 = paid/span（均摊到覆盖月）；物业 = 规则
+//    月费（应收固定 82/月，与实付优惠解耦——支付打折只体现在右列实付，杜绝错位合并
+//    账单 paid 虚高 → 均摊虚高 492/3=164）。
+//  - 覆盖区间直接存库（bill_start~bill_end），无需展示层前移 hack（撤 v2.2.16 电费
+//    ±1 月 SQL 窗口放宽——老 hack 是为“账单存缴费月”兜底，新引擎账单已存真实账期）。
 function computeMonths(bookId, type, year) {
   // v2.2.13 字典序坑：bill_start/bill_end 存 7 位 'YYYY-MM'（如 '2025-01'），
   // 若比较参数用 10 位 'YYYY-MM-DD'，'2025-01' < '2025-01-01' → 每年 1 月账单被滤掉。
   // 统一用 substr(1,7) 在 SQL 侧归一化，兼容库内 7/10 位两种存量。
   const yStart = `${year}-01`;
   const yEnd = `${year}-12`;
-  const activeRule = pickRuleAny(bookId, type, `${year}-01-01`);
+  // v2.2.17：账期起点的规则段可能年中才生效（如起始账期 2025-06）——年初无生效段时
+  // 再试年末，保证该年视图能取到规则单位/计费周期（7 位 YYYY-MM，规避 10 位字典序坑）
+  const activeRule =
+    pickRuleAny(bookId, type, `${year}-01`) || pickRuleAny(bookId, type, `${year}-12`);
   const isProperty = type === "property";
 
   const months = Array.from({ length: 12 }, (_, i) => ({
@@ -798,7 +982,7 @@ function computeMonths(bookId, type, year) {
     ym: `${year}-${String(i + 1).padStart(2, "0")}`,
     usage: 0,
     amount: 0,
-    amountAvg: 0, // v2.2.13：账单 paid 均摊到覆盖月（物业/水/气中间列与趋势图用）
+    amountAvg: 0, // 中间列/趋势图用：物业=规则月费，水/电/气=paid/span
     tier: 0,
     hasBill: false,
     note: "",
@@ -815,18 +999,16 @@ function computeMonths(bookId, type, year) {
   for (const rec of recs) {
     const span = recSpan(rec);
     const totalU = Number(rec.usage_total) || 0;
-    // v2.2.13：用量展示层均摊，所有覆盖月一律 +avgU，无余数补偿
     const avgU = Math.round(totalU / span);
     const paid = round2(Number(rec.paid) || 0);
-    // v2.2.15：按规则 effective_from 过滤（用户 2026-09-10 反馈）
-    // 账单右端 < 规则起点 → 这条账单在规则生效之前产生，不计入月份视图
-    // （如规则水 effective_from=2024-02 → 覆盖 2023-12~2024-01 的 11.22 账单应消失）。
+    // v2.2.17：规则起始账期过滤（EF <= 覆盖首月才计入；EF=2024-02 → 覆盖 2024-01 起
+    // 的账单不计）。覆盖区间已由 sync 保证不会跨过 EF，此处兜底 legacy/手动异常区间。
     // 字典序 7 位比较（YYYY-MM vs YYYY-MM）安全，规避 v2.2.12 7 位/10 位字典序 BUG。
     if (rec.rule_id) {
       const r = db.prepare("SELECT effective_from FROM utility_rules WHERE id=?").get(rec.rule_id);
       const ef = String(r?.effective_from || "").slice(0, 7);
-      const be = String(rec.bill_end || "").slice(0, 7);
-      if (ef && be && ef > be) continue;
+      const bs = String(rec.bill_start || "").slice(0, 7);
+      if (ef && bs && bs < ef) continue;
     }
     const [sY, sM] = String(rec.bill_start).split("-").map(Number);
     const [eY, eM] = String(rec.bill_end).split("-").map(Number);
@@ -839,33 +1021,24 @@ function computeMonths(bookId, type, year) {
       if (cm > 12) { cm = 1; cy += 1; }
       if (mList.length > 48) break;
     }
+    // 覆盖月每日均摊（v2.2.13 视觉一致优先）；物业中间列=规则月费（应收），其余=paid/span
+    const avgFee = isProperty
+      ? propertyFeeOf(bookId, rec, span, paid)
+      : round2(paid / span);
     for (const m of mList) {
       const row = months[m - 1];
       row.hasBill = true;
       row.tier = Math.max(row.tier, Number(rec.tier_level) || 1);
-      // 用量均摊：所有覆盖月相等（v2.2.13 视觉一致优先）
       row.usage += avgU;
-      // amountAvg = 该账单 paid 均摊到覆盖月（物业 246/3=82 每月；水/气同），
-      // 供「中间列/趋势图」用均摊月值展示。
-      row.amountAvg = round2(row.amountAvg + paid / span);
+      row.amountAvg = round2(row.amountAvg + avgFee);
+      // v2.2.17：金额整额放账期末月（bill_end 所在月；跨年账单只在账期末月所在年出现，
+      // 例如覆盖 2025-12~2026-01 → 金额在 2026-01，2025 视图只有 12 月用量没有金额）
+      if (eY === year && m === eM) {
+        row.amount = round2(row.amount + paid);
+      }
       if (rec.status === "pending") row.note = "待校正";
     }
-    // v2.2.14 金额锚「真实缴费月」（首笔流水月，payMonthOf）：
-    // 缴费月可能不在覆盖区间内——燃气双月缴 → 覆盖前 2 个月
-    // （缴 2026-02 → 覆盖 2025-12~2026-01），金额只出现在缴费月（右列），
-    // 其余覆盖月金额为 0（v2.2.6「缴费月累计」语义）。
-    // 缴费月行无用量但需标 hasBill（/years 年度金额汇总依赖行数据）。
-    const payYm = payMonthOf(bookId, rec);
-    if (payYm && String(payYm).slice(0, 4) === String(year)) {
-      const pM = Number(String(payYm).slice(5, 7));
-      const prow = months[pM - 1];
-      prow.hasBill = true;
-      prow.tier = Math.max(prow.tier, Number(rec.tier_level) || 1);
-      prow.amount = round2(prow.amount + paid);
-      if (rec.status === "pending") prow.note = "待校正";
-    }
   }
-  // 物业费无需档位字段，但保留 cycleType 与 ruleUnit 方便前端展示
   return months;
 }
 
@@ -1016,6 +1189,60 @@ export function migrateUtilityAlignV1() {
   console.log(
     `[utility-migrate] v2.2.14 存量校准完成：账单区间对齐 ${recMoved} 条、` +
       `燃气规则生效月调整 ${ruleMoved} 条、跳过 ${skipped} 条（手动/校正/无流水/已对齐）`
+  );
+}
+
+// =====================================================================
+// 存量校准 V2（v2.2.17 显式账期，服务启动时在 V1 之后跑一次）：
+// v2.2.14/2.2.15 靠「缴费月奇偶」猜覆盖块 → 区间错位、一笔流水生成 2 张账单、
+// 双月均摊一月多一月少、物业跨季错误合并（5/11 + 7/12 → 492）等顽疾。
+// 新引擎把「出账日窗口 → 覆盖账期」显式写进规则（cover_json），本迁移：
+//   1) 删除全部引擎账单（status IN ('auto','pending')）——manual/corrected 一律保留
+//      （用户手工添加/校正过的账单视为用户所有，不覆盖）；
+//   2) 按这些账单关联的流水，用新 utilitySyncFlowById 逐笔重建（覆盖区间由流水日号
+//      命中规则窗口推导，天然归位、天然合并队友分拆、天然同季合并物业）；
+//   3) 老规则无 cover_json → 读取端按类型默认账期兜底，无需回写。
+// 幂等：settings 打标 utility_align_v2 只跑一次；重建目标唯一（窗口互斥），可安全重放。
+// =====================================================================
+export function migrateUtilityAlignV2() {
+  if (getSetting("utility_align_v2", "") === "1") return;
+  let del = 0, resynced = 0;
+  // 1. 收集引擎账单关联流水（按账本分组），删除引擎账单
+  const recs = db
+    .prepare(
+      `SELECT * FROM utility_records
+        WHERE type IN ('water','electric','gas','property') AND status IN ('auto','pending')`
+    )
+    .all();
+  const byBook = new Map();
+  const delIds = [];
+  for (const rec of recs) {
+    delIds.push(rec.id);
+    const ids = flowIdsOf(rec);
+    if (!ids.length) continue;
+    if (!byBook.has(rec.book_id)) byBook.set(rec.book_id, new Set());
+    for (const fid of ids) byBook.get(rec.book_id).add(fid);
+  }
+  if (delIds.length) {
+    const ph = delIds.map(() => "?").join(",");
+    db.prepare(`DELETE FROM utility_records WHERE id IN (${ph})`).run(...delIds);
+    del = delIds.length;
+  }
+  // 2. 按流水重建（新语义：出账窗口 → 覆盖账期；规则不匹配的流水自然不再生成账单）
+  for (const [bookId, fset] of byBook) {
+    for (const fid of fset) {
+      try {
+        utilitySyncFlowById(bookId, fid, { preserveOnNoRule: false });
+        resynced += 1;
+      } catch (e) {
+        console.warn(`[utility-migrate] v2.2.17 流水 ${fid} 重建失败:`, e.message);
+      }
+    }
+  }
+  setSetting("utility_align_v2", "1");
+  console.log(
+    `[utility-migrate] v2.2.17 显式账期校准完成：删除引擎账单 ${del} 条、重建流水 ${resynced} 笔` +
+      `（manual/corrected 保留；老规则按类型默认账期兜底）`
   );
 }
 

@@ -48,6 +48,111 @@ function defaultTiers(type) {
 function metaOf(type) {
   return TYPES.find((t) => t.type === type) || TYPES[0];
 }
+
+// ============ v2.2.17 显式账期：出账日窗口 → 覆盖账期 ============
+// 覆盖方案（start=覆盖起始偏移 0=当月 -1=上月 -2=上上月；span=覆盖月数；quarter=自然季度）
+const COV_PRESETS = {
+  two: [
+    { v: "-2_2", start: -2, span: 2, label: "上月 + 上上月" },
+    { v: "-1_2", start: -1, span: 2, label: "当月 + 上月" },
+    { v: "-1_1", start: -1, span: 1, label: "上月（单月）" },
+    { v: "0_1", start: 0, span: 1, label: "当月（单月）" },
+  ],
+  single: [
+    { v: "-1_1", start: -1, span: 1, label: "上月（月初缴上月）" },
+    { v: "0_1", start: 0, span: 1, label: "当月" },
+    { v: "-1_2", start: -1, span: 2, label: "当月 + 上月" },
+  ],
+  property: [
+    { v: "q3", quarter: true, span: 3, label: "缴费月所在自然季度（季度缴）" },
+    { v: "0_1", start: 0, span: 1, label: "当月（每月缴）" },
+    { v: "-1_1", start: -1, span: 1, label: "上月（每月缴上月）" },
+    { v: "0_3", start: 0, span: 3, label: "当月起连缴 3 个月" },
+  ],
+};
+function covPresetOf(type, start, span, quarter) {
+  const list = type === "property" ? COV_PRESETS.property : type === "electric" ? COV_PRESETS.single : COV_PRESETS.two;
+  return list.find(
+    (p) => (quarter ? !!p.quarter : !p.quarter) && Number(p.start) === Number(start) && Number(p.span) === Number(span)
+  ) || list[0];
+}
+// 默认账期（与后端 defaultCover 一致）：水/气双窗口互斥；电单窗口上月；物业自然季度
+function defaultCoverRows(type) {
+  if (type === "water" || type === "gas") {
+    return [
+      { from: 1, to: 15, start: -2, span: 2, quarter: false },
+      { from: 16, to: 31, start: -1, span: 2, quarter: false },
+    ];
+  }
+  if (type === "electric") return [{ from: 1, to: 31, start: -1, span: 1, quarter: false }];
+  return [{ from: 1, to: 31, start: 0, span: 3, quarter: true }];
+}
+// 后端 decorateRule 的 cover → 表单行
+function coverToRows(type, cover) {
+  const wins = (cover && Array.isArray(cover.windows) && cover.windows.length)
+    ? cover.windows
+    : defaultCoverRows(type);
+  return wins.map((w) => ({
+    from: Number(w.from) || 1,
+    to: Number(w.to) || 31,
+    start: Number(w.start) || 0,
+    span: Math.max(1, Number(w.span) || 1),
+    quarter: !!w.quarter,
+  }));
+}
+// 表单行 → 提交的 cover
+function rowsToCover(rows) {
+  return {
+    windows: rows.map((r) => ({
+      from: Math.min(31, Math.max(1, Number(r.from) || 1)),
+      to: Math.min(31, Math.max(1, Number(r.to) || 1)),
+      start: Number(r.start) || 0,
+      span: Math.max(1, Number(r.span) || 1),
+      ...(r.quarter ? { quarter: true } : {}),
+    })),
+  };
+}
+function coverSummaryText(type, rows) {
+  if (type === "electric") {
+    const p = covPresetOf(type, rows[0]?.start, rows[0]?.span, rows[0]?.quarter);
+    return `任意日出账 → 覆盖${p.label}`;
+  }
+  if (type === "property") {
+    const p = covPresetOf(type, rows[0]?.start, rows[0]?.span, rows[0]?.quarter);
+    return `${rows[0]?.quarter ? "季度缴" : "每月缴"}：任意日 → ${p.label}`;
+  }
+  // 水/气：双窗口（互斥，一笔流水只命中一个）
+  return rows
+    .map((r) => {
+      const p = covPresetOf(type, r.start, r.span, r.quarter);
+      return `${r.from}-${r.to}号 → 覆盖${p.label}`;
+    })
+    .join("；");
+}
+function covOptionsOf(type) {
+  if (type === "property") return COV_PRESETS.property;
+  if (type === "electric") return COV_PRESETS.single;
+  return COV_PRESETS.two;
+}
+function covKeyOf(r) {
+  if (r.quarter) return "q3";
+  return `${Number(r.start) || 0}_${Math.max(1, Number(r.span) || 1)}`;
+}
+function applyCovRow(r, v) {
+  const opts = covOptionsOf(f.value.type);
+  const p = opts.find((x) => x.v === v) || opts[0];
+  r.quarter = !!p.quarter;
+  r.start = p.start ?? 0;
+  r.span = p.span;
+}
+function addCoverRow() {
+  const t = f.value.type;
+  f.value.coverRows.push(
+    t === "water" || t === "gas"
+      ? { from: 1, to: 15, start: -2, span: 2, quarter: false }
+      : { from: 1, to: 31, start: -1, span: 1, quarter: false }
+  );
+}
 function blankForm(type) {
   const m = metaOf(type);
   const now = new Date();
@@ -61,6 +166,7 @@ function blankForm(type) {
     bill_span: m.span,
     cycle_type: type === "gas" ? "by_year" : "by_span",
     unit: type === "electric" ? "kWh" : type === "property" ? "元" : "m³",
+    coverRows: defaultCoverRows(type),
     tiers: defaultTiers(type),
     season:
       type === "electric"
@@ -101,6 +207,7 @@ function openEdit(rule) {
     bill_span: rule.bill_span,
     cycle_type: rule.cycle_type,
     unit: rule.unit || "m³",
+    coverRows: coverToRows(rule.type, rule.cover),
     tiers: (rule.tiers || []).map((t) => ({
       cap: t.cap == null ? "" : String(t.cap),
       price: String(t.price),
@@ -147,11 +254,19 @@ function normTiers(list) {
 }
 async function save() {
   if (!/^\d{4}-\d{2}$/.test(f.value.effective_from)) {
-    toast("请选择生效起始月");
+    toast("请选择起始账期（首个被覆盖月份）");
     return;
   }
   if (f.value.effective_to && !/^\d{4}-\d{2}$/.test(f.value.effective_to)) {
-    toast("结束月格式不对");
+    toast("结束账期格式不对");
+    return;
+  }
+  // v2.2.17：出账窗口校验（from<=to、1~31）
+  const rows = (f.value.coverRows || []).filter(
+    (r) => Number(r.from) >= 1 && Number(r.to) >= Number(r.from) && Number(r.to) <= 31
+  );
+  if (!rows.length) {
+    toast("出账日窗口配置不正确（1~31 且起≤止）");
     return;
   }
   const tiers = normTiers(f.value.tiers);
@@ -165,11 +280,12 @@ async function save() {
     category: f.value.category || DEFAULT_CAT,
     effective_from: f.value.effective_from,
     effective_to: f.value.effective_to || "",
-    bill_span: Math.max(1, Number(f.value.bill_span) || metaOf(f.value.type).span),
+    bill_span: Math.max(...rows.map((r) => Math.max(1, Number(r.span) || 1))),
     cycle_type: f.value.type === "gas" ? "by_year" : "by_span",
     unit: f.value.unit,
     tiers,
     monthly_fee: f.value.type === "property" ? Number(f.value.monthly_fee) || 0 : undefined,
+    cover: rowsToCover(f.value.coverRows),
   };
   if (f.value.type === "electric") {
     const sTiers = normTiers(f.value.season?.tiers || []);
@@ -182,10 +298,10 @@ async function save() {
   try {
     if (editingId.value) {
       await api.put(`/utility/rules/${editingId.value}`, payload);
-      toast("已保存");
+      toast("已保存（改动后可在用量页点「重新扫描」重排历史账单）");
     } else {
       await api.post("/utility/rules", payload);
-      toast("已创建规则（生效月份之前的流水不会自动计入）");
+      toast("已创建规则（起始账期之前的流水不会自动计入）");
     }
     showEdit.value = false;
     await load();
@@ -208,11 +324,12 @@ function summary(rule) {
   const parts = tiers.map((t) =>
     t.cap == null ? `超第${tiers.length}档 ¥${t.price}` : `0~${t.cap} ¥${t.price}`
   );
-  let s = `每笔覆盖 ${rule.bill_span} 个月｜档位：${parts.join("，")}`;
+  // v2.2.17：账期显式展示（出账窗口 → 覆盖账期）
+  let s = `账期：${coverSummaryText(rule.type, coverToRows(rule.type, rule.cover))}｜档位：${parts.join("，")}`;
   if (rule.type === "electric" && rule.season) {
     s += `｜夏季(${rule.season.months.join("/")}月)：${rule.season.tiers.map((t) => (t.cap == null ? `超¥${t.price}` : `≤${t.cap} ¥${t.price}`)).join("，")}`;
   }
-  if (rule.type === "property" && rule.monthly_fee != null) s = `每笔覆盖 ${rule.bill_span} 个月｜月费 ¥${rule.monthly_fee}`;
+  if (rule.type === "property" && rule.monthly_fee != null) s += `｜月费 ¥${rule.monthly_fee}`;
   return s;
 }
 function effText(r) {
@@ -249,7 +366,7 @@ onMounted(load);
       </div>
     </div>
     <p class="muted intro">
-      同一类型可配置多段规则（换城市 / 调价 = 新建一段并设置生效时间）。<b>规则生效月份之前的流水不会自动计入</b>；账单生成时按缴费当月匹配生效中的规则段。
+      同一类型可配置多段规则（换城市 / 调价 = 新建一段）。<b>「起始账期」是首个被覆盖的月份</b>（水费选 2024-02 → 首期覆盖 2~3 月、首笔流水约 3 月下旬），之前的流水不计入；账单生成时按流水日期命中「出账窗口」得到唯一账期。
     </p>
 
     <div v-if="loading" class="card muted">加载中…</div>
@@ -297,26 +414,46 @@ onMounted(load);
           <label>规则名称（选填，如 广州水费2026）
             <input class="input" v-model="f.name" placeholder="选填" />
           </label>
-          <label>生效起始月（含）
+          <label>起始账期（首个被覆盖月份）
             <input class="input" type="month" v-model="f.effective_from" />
+            <small class="field-hint">例：水费选 2024-02 → 首期覆盖 2~3 月、第一笔流水约 3 月下旬</small>
           </label>
-          <label>生效结束月（留空 = 至今）
+          <label>结束账期（留空 = 至今）
             <input class="input" type="month" v-model="f.effective_to" />
-          </label>
-          <label>每笔覆盖月数
-            <div class="span-input">
-              <input class="input" type="number" min="1" v-model="f.bill_span" :disabled="f.type === 'gas'" />
-              <!-- v260909：物业/水/电常用 1/3/4/6/12 月快捷选择 -->
-              <div class="span-chips" v-if="f.type !== 'gas'">
-                <span :class="['mchip', { on: Number(f.bill_span) === n }]" v-for="n in [1, 3, 4, 6, 12]" :key="n" @click="f.bill_span = n">{{ n }}月</span>
-              </div>
-            </div>
           </label>
           <label>用量单位
             <select class="select" v-model="f.unit">
               <option v-for="u in ['m³', 'kWh', '元', '吨']" :key="u" :value="u">{{ u }}</option>
             </select>
           </label>
+        </div>
+
+        <!-- v2.2.17 出账日窗口 → 覆盖账期（显式账期，替代按奇偶月猜块） -->
+        <div class="tier-block">
+          <div class="section-title">出账日与覆盖账期
+            <span class="muted hint-inline" v-if="f.type === 'water' || f.type === 'gas'">
+              （一笔流水按自身日期只命中一个窗口 → 只出一张账单）
+            </span>
+          </div>
+          <div v-for="(r, i) in f.coverRows" :key="i" class="cover-row">
+            <span class="cap-lbl">{{ f.coverRows.length > 1 ? "条件 " + (i + 1) : "出账日" }}</span>
+            <template v-if="!r.quarter">
+              <input class="input" type="number" min="1" max="31" v-model="r.from" style="width: 72px" />
+              <span class="x">—</span>
+              <input class="input" type="number" min="1" max="31" v-model="r.to" style="width: 72px" />
+              <span class="x">号</span>
+            </template>
+            <span v-else class="cov-anyday">季内任意一天</span>
+            <span class="x">→ 覆盖</span>
+            <select class="select" style="width: auto; flex: 1; min-width: 170px" :value="covKeyOf(r)" @change="applyCovRow(r, $event.target.value)">
+              <option v-for="p in covOptionsOf(f.type)" :key="p.v" :value="p.v">{{ p.label }}</option>
+            </select>
+            <button class="btn btn-sm" v-if="f.coverRows.length > 1" @click="f.coverRows.splice(i, 1)">✕</button>
+          </div>
+          <button class="btn btn-sm" v-if="f.type === 'water' || f.type === 'gas'" @click="addCoverRow">+ 加条件</button>
+          <div class="muted" style="font-size: 12px; margin-top: 6px">
+            电费：月初缴上月 → 覆盖上月；物业：季度缴 → 季内任一天都归该季度（多个缴费自动合并为一季一张）。改动后可在用量页「重新扫描」重排历史账单。
+          </div>
         </div>
 
         <div class="tier-block" v-if="f.type !== 'property'">
@@ -395,5 +532,10 @@ onMounted(load);
 .span-input { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .span-input .input { width: 90px; flex-shrink: 0; }
 .span-chips { display: inline-flex; gap: 5px; flex-wrap: wrap; }
+/* v2.2.17：出账窗口 → 覆盖账期 行 */
+.cover-row { display: flex; align-items: center; gap: 8px; margin: 7px 0; flex-wrap: wrap; }
+.cov-anyday { font-size: 13px; color: var(--text-2); }
+.hint-inline { font-size: 11px; font-weight: 400; }
+.field-hint { font-size: 11px; color: var(--text-2); line-height: 1.4; }
 .modal-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 </style>

@@ -20,7 +20,7 @@ import savingsRoutes from "./routes/savings.js";
 import walletRoutes from "./routes/wallets.js";
 import syncRoutes from "./routes/sync.js";
 import merchantRoutes from "./routes/merchants.js";
-import utilityRoutes, { migrateUtilityAlignV1 } from "./routes/utility.js";
+import utilityRoutes, { migrateUtilityAlignV1, migrateUtilityAlignV2 } from "./routes/utility.js";
 import { logOp } from "./oplog.js";
 import oplogRoutes from "./oplog.js";
 import { generateDueRecurring } from "./lib/recurring.js";
@@ -55,6 +55,14 @@ try {
   migrateUtilityAlignV1();
 } catch (e) {
   console.warn("[utility-migrate] 存量校准失败:", e.message);
+}
+
+// 存量校准 V2（v2.2.17 显式账期）：删除引擎账单（auto/pending）并按「出账窗口→账期」
+// 从流水重建；manual/corrected 保留。须在 V1 之后跑（V1 会把老燃气规则生效月推到 2023-12）。
+try {
+  migrateUtilityAlignV2();
+} catch (e) {
+  console.warn("[utility-migrate] v2.2.17 显式账期校准失败:", e.message);
 }
 
 // 存量流水 updated_at 回填：历史 bug 使定期记账生成的流水漏写 updated_at（NULL），
