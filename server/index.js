@@ -20,7 +20,7 @@ import savingsRoutes from "./routes/savings.js";
 import walletRoutes from "./routes/wallets.js";
 import syncRoutes from "./routes/sync.js";
 import merchantRoutes from "./routes/merchants.js";
-import utilityRoutes from "./routes/utility.js";
+import utilityRoutes, { migrateUtilityAlignV1 } from "./routes/utility.js";
 import { logOp } from "./oplog.js";
 import oplogRoutes from "./oplog.js";
 import { generateDueRecurring } from "./lib/recurring.js";
@@ -47,6 +47,14 @@ try {
     console.log(`[migrate] 已为 ${r.changes} 笔空名称流水补齐分类名`);
 } catch (e) {
   console.warn("[migrate] 名称补齐失败:", e.message);
+}
+
+// 存量水电气账单覆盖区间对齐（v2.2.14）：燃气规则生效月 → 2023-12、
+// 水/气/物业历史账单 bill_start/bill_end 按真实缴费月重排。幂等 + settings 打标。
+try {
+  migrateUtilityAlignV1();
+} catch (e) {
+  console.warn("[utility-migrate] 存量校准失败:", e.message);
 }
 
 // 存量流水 updated_at 回填：历史 bug 使定期记账生成的流水漏写 updated_at（NULL），

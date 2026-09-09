@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { db } from "../db.js";
+import { db, getSetting, setSetting } from "../db.js";
 import { auth, requireBook, wrap } from "../mw.js";
 
 // =====================================================================
@@ -259,12 +259,59 @@ function paidOfFlows(bookId, ids) {
     .get(bookId, ...ids);
   return round2(Number(r.t) || 0);
 }
+
+// 真实缴费月 = 关联流水里最早一笔的 flow_time 月（'YYYY-MM'）；
+// 队友分拆多笔跨月支付时取首笔（如燃气 8/25 付一笔、9/2 补尾款 → 缴费月 8 月）。
+// 无流水（手动添加的账单）→ 退回 bill_start 月（老行为，保持兼容）。
+function payMonthOf(bookId, rec) {
+  const ids = flowIdsOf(rec);
+  if (ids.length) {
+    const ph = ids.map(() => "?").join(",");
+    const row = db
+      .prepare(
+        `SELECT MIN(substr(flow_time,1,7)) m FROM flows WHERE book_id=? AND id IN (${ph})`
+      )
+      .get(bookId, ...ids);
+    if (row && row.m) return row.m;
+  }
+  return String(rec.bill_start || "").slice(0, 7);
+}
 function recSpan(rec) {
   return monthSpan(rec.bill_start, rec.bill_end);
 }
 // 覆盖区间行数 = 规则覆盖月数（同一类型账单区间应与规则一致）
 function spanOfRule(rule) {
   return Math.max(1, Number(rule?.bill_span) || 1);
+}
+
+// 账单覆盖区间由「缴费月」按规则块对齐推导（v2.2.14 第5轮定论，与展示模型配套：
+// 用量归覆盖月（双月各半）、金额归真实缴费月）：
+//   electric(span1)         → 覆盖 = 缴费月
+//   water(span2, 单月出账)  → 出账覆盖「本月+上月」：缴费奇数月 M → [M-1, M]；
+//                             缴费月偶数（迟缴上月账）→ 归到前一块（末=上月奇数月）
+//   gas(span2, 双月出账)    → 出的是前面 2 个月的量：缴费偶数月 M → [M-2, M-1]；
+//                             缴费月奇数（迟缴）→ 归到前一块（末=缴月-2）
+//   物业(span3)             → 缴费时间不定，对齐自然季度（1/4/7/10 起）：缴费月所在季
+// 双月/季度账单与缴费月解耦后，流水月可能落在覆盖区间外（燃气缴 2026-02 → 覆盖
+// 2025-12~2026-01）；金额展示由 computeMonths 按 payMonthOf 另行锚定。
+function alignBillBlock(type, ym, rule) {
+  const span = spanOfRule(rule);
+  const m = Number(String(ym || "").split("-")[1]);
+  if (!m) return { start: ym, end: ym };
+  if (span <= 1) return { start: ym, end: ym };
+  if (span === 3) {
+    const back = (m - 1) % 3; // 回退到自然季度首月（0/1/2）
+    const start = ymAdd(ym, -back);
+    return { start, end: ymAdd(start, 2) };
+  }
+  if (type === "gas") {
+    // 燃气：块末 = 缴月前最近奇数月（偶数缴→缴月-1；奇数迟缴→缴月-2）
+    const end = ymAdd(ym, m % 2 === 0 ? -1 : -2);
+    return { start: ymAdd(end, -1), end };
+  }
+  // 水费：块末 = 缴月（奇数出账月）；偶数迟缴 → 前一块（末=缴月-1）
+  const end = ymAdd(ym, m % 2 === 1 ? 0 : -1);
+  return { start: ymAdd(end, -1), end };
 }
 
 // 重算一张账单（paid 汇总 + 反推用量/档位/应缴 + 状态）
@@ -297,8 +344,11 @@ function recomputeRecord(bookId, rec, rule, force) {
     tier = 1;
     usageTotal = null;
   } else if (rule?.cycle_type === "by_year") {
-    // 燃气：年累计。paidBefore = 当年总额 − 本账单总额（按规则绑定分类的年累计口径）
-    const year = Number(String(rec.bill_start).slice(0, 4));
+    // 燃气：年累计。paidBefore = 当年总额 − 本账单总额（按规则绑定分类的年累计口径）。
+    // 年份锚「缴费自然年」（真实缴费月，payMonthOf）——覆盖块可跨年
+    // （缴 2026-02 → 覆盖 2025-12~2026-01，金额计入 2026 年累计）。
+    const payYm = payMonthOf(bookId, rec) || rec.bill_start;
+    const year = Number(String(payYm).slice(0, 4));
     const annual = annualPaidOf(bookId, rec.type, year, ruleCategory(rule));
     const paidBefore = Math.max(0, round2(annual - paid));
     const tiers = parseTiers(rule);
@@ -357,8 +407,10 @@ export function utilitySyncFlowById(bookId, flowId, opts = {}) {
     }
     return;
   }
-  const bStart = ym;
-  const bEnd = ymAdd(ym, spanOfRule(rule) - 1);
+  // v2.2.14：账单覆盖区间按「规则块」对齐推导（水单月→本月+上月；气双月→前 2 个月；
+  // 物业→自然季度），不再用「缴费月 + span-1」顺推（那会把覆盖区间整体错位 +1 月，
+  // 如 2026-02-05 缴燃气 → 正确覆盖 2025-12~2026-01，旧逻辑却记成 2026-01~02）。
+  const { start: bStart, end: bEnd } = alignBillBlock(type, ym, rule);
 
   // v260908 双月账单错位修复：队友分拆支付的尾款若落在相邻月（双月账单 8/25 付一笔、
   // 9/2 再付一笔），老逻辑按各自支付月各生成一张错位账单 → 均摊金额一月多一月少。
@@ -724,14 +776,13 @@ r.post(
 );
 
 // ---------------- 月度视图（按月看：某年 12 个月） ----------------
-// v2.2.13 语义反转（用户 2026-09-10 第 4 轮定论）：
-//  - 金额回到 v2.2.6「缴费月累计」：paid 全额累加在账单起始月（bill_start，对应流水月=真实缴费月），
-//    覆盖的其余月金额为 0。趋势表/月份行只在缴费月看到完整金额。
-//  - 用量双月完全一致（取消余数归 last 的旧行为）：
-//    avgU = Math.round(totalU/span)，所有覆盖月都 +avgU。
-//    视觉一致优先；如 25/2 → 两月都 13（不再 12+13）；23/2 → 两月都 12。
-//    跨月数据库里仍是账单的 totalU，月度 Σmonth.usage 可能 ±1m³，
-//    这是用户期望的「双月看起来相等」取舍，非 BUG。
+// v2.2.14 语义（用户 2026-09-10 第 5 轮定论，覆盖区间与缴费月解耦后）：
+//  - 用量归「覆盖月」：avgU = Math.round(totalU/span)，所有覆盖月都 +avgU
+//    （双月完全一致，余数不补偿；视觉一致优先，月度 Σusage 可能 ±1 个单位）。
+//  - 金额归「真实缴费月」（payMonthOf = 首笔流水月）：paid 全额累加在缴费月（右列），
+//    覆盖的其余月金额为 0。缴费月可能不在覆盖区间内（燃气缴 2026-02 → 覆盖
+//    2025-12~2026-01，金额显示在 2026-02）。
+//  - amountAvg = paid 均摊到覆盖月（物业 246/3=82 每月；供中间列/趋势图用）。
 //  - 取消下发 tierThresholds：用户要求趋势图不再画档位虚线。
 function computeMonths(bookId, type, year) {
   // v2.2.13 字典序坑：bill_start/bill_end 存 7 位 'YYYY-MM'（如 '2025-01'），
@@ -784,12 +835,24 @@ function computeMonths(bookId, type, year) {
       row.tier = Math.max(row.tier, Number(rec.tier_level) || 1);
       // 用量均摊：所有覆盖月相等（v2.2.13 视觉一致优先）
       row.usage += avgU;
-      // v2.2.13：amount = 缴费月全额（bill_start 月，v2.2.6 语义）；
       // amountAvg = 该账单 paid 均摊到覆盖月（物业 246/3=82 每月；水/气同），
       // 供「中间列/趋势图」用均摊月值展示。
-      if (sY === year && m === sM) row.amount = round2(row.amount + paid);
       row.amountAvg = round2(row.amountAvg + paid / span);
       if (rec.status === "pending") row.note = "待校正";
+    }
+    // v2.2.14 金额锚「真实缴费月」（首笔流水月，payMonthOf）：
+    // 缴费月可能不在覆盖区间内——燃气双月缴 → 覆盖前 2 个月
+    // （缴 2026-02 → 覆盖 2025-12~2026-01），金额只出现在缴费月（右列），
+    // 其余覆盖月金额为 0（v2.2.6「缴费月累计」语义）。
+    // 缴费月行无用量但需标 hasBill（/years 年度金额汇总依赖行数据）。
+    const payYm = payMonthOf(bookId, rec);
+    if (payYm && String(payYm).slice(0, 4) === String(year)) {
+      const pM = Number(String(payYm).slice(5, 7));
+      const prow = months[pM - 1];
+      prow.hasBill = true;
+      prow.tier = Math.max(prow.tier, Number(rec.tier_level) || 1);
+      prow.amount = round2(prow.amount + paid);
+      if (rec.status === "pending") prow.note = "待校正";
     }
   }
   // 物业费无需档位字段，但保留 cycleType 与 ruleUnit 方便前端展示
@@ -871,5 +934,79 @@ r.get(
     res.json({ list });
   })
 );
+
+// =====================================================================
+// 存量校准（v2.2.14，服务启动时跑一次；服务端升级后自动生效）：
+// 老引擎用「缴费月 + span-1」顺推账单区间 → 水/气/物业历史账单覆盖区间整体错位 +1 月
+// （如 2026-02-05 缴燃气 219.52 应覆盖 2025-12~2026-01，库里却记 2026-01~02）。
+// 本迁移：
+//   1) 燃气规则生效月 2024-01 → 2023-12（用户要求，首张双月账单 2023-12~2024-01 可关联；
+//      仅当该 (book, gas, category) 尚无 2023-12 起规则段时才改，避免与更早分段重叠）；
+//   2) 按「真实缴费月」（首笔关联流水月）重新对齐水/气/物业账单覆盖区间，
+//      与 utilitySyncFlowById 的 alignBillBlock 同一套规则；
+//   3) 只动 status IN ('auto','pending') 的引擎账单（手动添加/用户校正过的不覆盖），
+//      且只改 utility_records.bill_start/bill_end —— 绝不碰 flows 记账流水。
+// 幂等：对齐目标是缴费月推导的唯一稳定块，重复执行结果不变；settings 打标防重复跑。
+// =====================================================================
+export function migrateUtilityAlignV1() {
+  if (getSetting("utility_align_v1", "") === "1") return;
+  let recMoved = 0, ruleMoved = 0, skipped = 0;
+
+  // 1. 燃气规则生效月调整
+  const gasRules = db
+    .prepare(
+      `SELECT * FROM utility_rules WHERE type='gas' AND effective_from='2024-01'
+         ORDER BY book_id, category`
+    )
+    .all();
+  for (const r of gasRules) {
+    const dup = db
+      .prepare(
+        `SELECT 1 FROM utility_rules WHERE book_id=? AND type='gas' AND category=?
+           AND effective_from='2023-12' AND id<>? LIMIT 1`
+      )
+      .get(r.book_id, ruleCategory(r), r.id);
+    if (dup) { skipped += 1; continue; }
+    db.prepare(
+      "UPDATE utility_rules SET effective_from='2023-12', updated_at=datetime('now','localtime') WHERE id=?"
+    ).run(r.id);
+    ruleMoved += 1;
+  }
+
+  // 2. 水/气/物业账单覆盖区间对齐
+  const recs = db
+    .prepare(
+      `SELECT * FROM utility_records WHERE type IN ('water','gas','property')
+         AND status IN ('auto','pending')`
+    )
+    .all();
+  for (const rec of recs) {
+    const ids = flowIdsOf(rec);
+    if (!ids.length) { skipped += 1; continue; } // 无流水的手动账单不动
+    const payYm = payMonthOf(rec.book_id, rec);
+    if (!payYm) { skipped += 1; continue; }
+    const rule = rec.rule_id
+      ? db.prepare("SELECT * FROM utility_rules WHERE id=?").get(rec.rule_id)
+      : pickRuleAny(rec.book_id, rec.type, payYm);
+    const { start, end } = alignBillBlock(
+      rec.type,
+      payYm,
+      rule || { bill_span: recSpan(rec) }
+    );
+    if (
+      String(rec.bill_start).slice(0, 7) === start &&
+      String(rec.bill_end).slice(0, 7) === end
+    ) continue; // 已对齐
+    db.prepare(
+      `UPDATE utility_records SET bill_start=?, bill_end=?, updated_at=datetime('now','localtime') WHERE id=?`
+    ).run(start, end, rec.id);
+    recMoved += 1;
+  }
+  setSetting("utility_align_v1", "1");
+  console.log(
+    `[utility-migrate] v2.2.14 存量校准完成：账单区间对齐 ${recMoved} 条、` +
+      `燃气规则生效月调整 ${ruleMoved} 条、跳过 ${skipped} 条（手动/校正/无流水/已对齐）`
+  );
+}
 
 export default r;
