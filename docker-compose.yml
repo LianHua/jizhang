@@ -1,8 +1,8 @@
 services:
   jizhang:
     # 直接拉取预编译镜像（已发布到 Docker Hub，走 docker.io 镜像源）
-    # 镜像位于 Docker Hub 账户 hwalt（自建仓库，CI 通过仓库 Secrets 的 DOCKERHUB_USERNAME 推送）
-    image: hwalt/jizhang:latest
+    # 镜像位于 Docker Hub 账户 hwaltz（自建仓库，CI 通过仓库 Secrets 的 DOCKERHUB_USERNAME 推送）
+    image: hwaltz/jizhang:latest
     container_name: jizhang
     restart: unless-stopped
 
