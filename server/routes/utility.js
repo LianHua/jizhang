@@ -818,6 +818,16 @@ function computeMonths(bookId, type, year) {
     // v2.2.13：用量展示层均摊，所有覆盖月一律 +avgU，无余数补偿
     const avgU = Math.round(totalU / span);
     const paid = round2(Number(rec.paid) || 0);
+    // v2.2.15：按规则 effective_from 过滤（用户 2026-09-10 反馈）
+    // 账单右端 < 规则起点 → 这条账单在规则生效之前产生，不计入月份视图
+    // （如规则水 effective_from=2024-02 → 覆盖 2023-12~2024-01 的 11.22 账单应消失）。
+    // 字典序 7 位比较（YYYY-MM vs YYYY-MM）安全，规避 v2.2.12 7 位/10 位字典序 BUG。
+    if (rec.rule_id) {
+      const r = db.prepare("SELECT effective_from FROM utility_rules WHERE id=?").get(rec.rule_id);
+      const ef = String(r?.effective_from || "").slice(0, 7);
+      const be = String(rec.bill_end || "").slice(0, 7);
+      if (ef && be && ef > be) continue;
+    }
     const [sY, sM] = String(rec.bill_start).split("-").map(Number);
     const [eY, eM] = String(rec.bill_end).split("-").map(Number);
     // 本账单覆盖的月份集合（仅取与查询年相交部分）

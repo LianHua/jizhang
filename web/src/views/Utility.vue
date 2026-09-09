@@ -216,29 +216,17 @@ function fmtAmount(v) {
 }
 
 // ---------------- 详情 ----------------
-// 账单在月份里的出现条件（v2.2.14 与「金额锚真实缴费月」配套）：
-//  ① 覆盖该月（用量归属）；② 该月实缴过（金额锚缴费月，缴费月可能不在覆盖区间内，
-//  如燃气缴 2026-02 → 覆盖 2025-12~2026-01，2 月行右列显示 ¥219.52 需点得开）。
-// 排序：实缴月命中优先（让弹窗默认展示与右列金额一致的那张账单）。
-function billPayYm(b) {
-  const flows = b.flows || [];
-  if (flows.length) {
-    const yms = flows
-      .map((f) => String(f.flow_time || "").slice(0, 7))
-      .filter((x) => /^\d{4}-\d{2}$/.test(x));
-    if (yms.length) return yms.sort()[0]; // 首笔 = 真实缴费月（与服务端 payMonthOf 一致）
-  }
-  return String(b.bill_start || "").slice(0, 7);
-}
+// 弹窗命中：仅「账单覆盖该月」（用户 2026-09-10 第 6 轮定论）。
+// 缴费月命中曾用于支持「燃气 2 月 ¥219.52 点开对应账期 12~01 的账单」，但带来
+// 弹窗合并错位（账单可能跨月覆盖，缴费月与覆盖月错位时两张账单进同一弹窗）。
+// 现在改严格覆盖——账期右端 ≥ 账期左端 ≤ 该月 的账单才进入弹窗。
 function openDetail(m) {
   detailMonth.value = ym(m);
   const ymStr = detailMonth.value;
-  const bills = records.value.filter((b) => {
-    if (b.bill_start <= ymStr && b.bill_end >= ymStr) return true; // 覆盖该月
-    return billPayYm(b) === ymStr; // 或该月实缴
-  });
+  const bills = records.value.filter(
+    (b) => b.bill_start <= ymStr && b.bill_end >= ymStr
+  );
   if (!bills.length) return; // 无账单的月不可点
-  bills.sort((a, b) => Number(billPayYm(b) === ymStr) - Number(billPayYm(a) === ymStr));
   detailBills.value = bills;
   selBill.value = bills[0];
   resetEdit();
@@ -283,10 +271,7 @@ async function saveCorrection() {
     // 重新定位弹窗数据（与 openDetail 同一匹配口径）
     const ymStr = detailMonth.value;
     detailBills.value = records.value.filter(
-      (x) => (x.bill_start <= ymStr && x.bill_end >= ymStr) || billPayYm(x) === ymStr
-    );
-    detailBills.value.sort(
-      (a, x) => Number(billPayYm(x) === ymStr) - Number(billPayYm(a) === ymStr)
+      (x) => x.bill_start <= ymStr && x.bill_end >= ymStr
     );
     selBill.value = detailBills.value.find((x) => x.id === b.id) || detailBills.value[0];
     resetEdit();
