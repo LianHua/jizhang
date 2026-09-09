@@ -22,6 +22,8 @@ const year = ref(new Date().getFullYear());
 const loading = ref(false);
 const months = ref([]);
 const years = ref([]);
+// v260910：规则起点前年份不可切换（翻年下限 = /years 升序首年；无数据时 null 不限）
+const minYear = ref(null);
 const rules = ref([]);
 const records = ref([]);
 const scanning = ref(false);
@@ -170,13 +172,21 @@ async function loadYears() {
       params: { type: segType.value },
     });
     years.value = data.list || [];
+    // 升序首年 = 可切换年份下限（规则起点前的年份服务端不下发）
+    minYear.value = years.value.length ? years.value[0].year : null;
+    return years.value;
   } finally {
     loading.value = false;
   }
 }
 
 async function refresh() {
-  await Promise.all([loadAll(), viewMode.value === "year" ? loadYears() : loadMonths()]);
+  // 始终拉 years 以维护翻年下限（规则起点前年份不可切换，v260910）
+  await loadYears();
+  await Promise.all([
+    loadAll(),
+    viewMode.value === "year" ? Promise.resolve() : loadMonths(),
+  ]);
 }
 
 function switchMode(m) {
@@ -196,7 +206,11 @@ function switchType(t) {
   refresh();
 }
 function shiftYear(d) {
-  year.value += d;
+  // v260910：规则起点前年份不可切换（下限 = /years 升序首年）；上限同安卓 +3 年
+  const next = year.value + d;
+  if (next < (minYear.value ?? -9999)) return;
+  if (next > new Date().getFullYear() + 3) return;
+  year.value = next;
   refresh();
 }
 
@@ -372,7 +386,7 @@ watch(year, refresh);
           <button :class="['vseg-btn', { on: viewMode === 'year' }]" @click="switchMode('year')">按年</button>
         </div>
         <template v-if="viewMode === 'month'">
-          <button class="btn btn-sm" @click="shiftYear(-1)">←</button>
+          <button class="btn btn-sm" :disabled="minYear != null && year <= minYear" @click="shiftYear(-1)">←</button>
           <span class="year-txt">{{ year }} 年</span>
           <button class="btn btn-sm" @click="shiftYear(1)">→</button>
         </template>
