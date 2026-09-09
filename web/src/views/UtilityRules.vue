@@ -304,7 +304,13 @@ onMounted(load);
             <input class="input" type="month" v-model="f.effective_to" />
           </label>
           <label>每笔覆盖月数
-            <input class="input" type="number" min="1" v-model="f.bill_span" :disabled="f.type === 'gas'" />
+            <div class="span-input">
+              <input class="input" type="number" min="1" v-model="f.bill_span" :disabled="f.type === 'gas'" />
+              <!-- v260909：物业/水/电常用 1/3/4/6/12 月快捷选择 -->
+              <div class="span-chips" v-if="f.type !== 'gas'">
+                <span :class="['mchip', { on: Number(f.bill_span) === n }]" v-for="n in [1, 3, 4, 6, 12]" :key="n" @click="f.bill_span = n">{{ n }}月</span>
+              </div>
+            </div>
           </label>
           <label>用量单位
             <select class="select" v-model="f.unit">
@@ -385,5 +391,9 @@ onMounted(load);
 .month-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
 .mchip { font-size: 12px; padding: 3px 9px; border-radius: 999px; background: var(--surface-2); cursor: pointer; user-select: none; }
 .mchip.on { background: var(--primary); color: #fff; }
+/* v260909：bill_span 快捷 chips */
+.span-input { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.span-input .input { width: 90px; flex-shrink: 0; }
+.span-chips { display: inline-flex; gap: 5px; flex-wrap: wrap; }
 .modal-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 </style>

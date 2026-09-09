@@ -726,35 +726,85 @@ r.post(
 // 月度视图核心：账单覆盖月份与查询年相交的部分按「均摊取整」分配。
 // usage 余数归账单最后一个月（与月份列表整数显示一致）；
 // 金额每期 = round2(实付/覆盖月数)，各期相等（四舍五入一致）。
+// v260909：按规则有效范围裁剪——「缴费规则未涉及的年月不显示」；
+//         每行附加 tierThresholds（档位累计上限，物业费无档位=null）便于趋势图画虚线。
 function computeMonths(bookId, type, year) {
-  const yStart = `${year}-01`;
-  const yEnd = `${year}-12`;
+  // 1. 找到该 type 在 [year, year] 内（或与 year 相交）的所有规则
+  const yearStart = `${year}-01`;
+  const yearEnd = `${year}-12`;
+  const rules = db
+    .prepare(
+      `SELECT * FROM utility_rules WHERE book_id=? AND type=?
+         AND effective_from <= ? AND (effective_to IS NULL OR effective_to >= ?)
+         ORDER BY effective_from DESC`
+    )
+    .all(bookId, type, yearEnd, yearStart);
+  if (!rules.length) return []; // 无规则 = 该年无月份
+
+  // 2. 算规则覆盖区间（处理多段规则的并集 [min from, max to]）
+  //    末段 effective_to 为 null 时也作为 ∞ 处理——年末裁剪由 startM/endM 决定
+  let fromYm = "9999-12", toYm = "0000-01";
+  for (const r of rules) {
+    if (r.effective_from < fromYm) fromYm = r.effective_from;
+    const t = r.effective_to || "9999-12"; // null = ∞，不裁历史年末
+    if (t > toYm) toYm = t;
+  }
+  if (toYm < yearStart || fromYm > yearEnd) return []; // 该年完全不在规则区间
+
+  // 3. 裁剪到 year 范围（[max(1, fromYm 月份), min(12, toYm 月份)]）
+  //    toYm 可能是 "9999-12"（∞），min(12, 99)=12，所以历史年不会因「今年是 9 月」被裁短
+  const startM = Math.max(1, Number(fromYm.slice(5, 7)));
+  const endM = Math.min(12, Number(toYm.slice(5, 7)));
+  if (startM > endM) return [];
+
+  // 4. 选 active rule（按 year 中点选最匹配的规则段）取档位阈值
+  const activeRule = pickRuleAny(bookId, type, yearStart);
+  const tiers = activeRule ? effTiers(activeRule, yearStart) : [];
+  const tierThresholds = [];
+  let acc = 0;
+  for (const t of tiers) {
+    if (t.cap == null || Number(t.cap) === Infinity) {
+      tierThresholds.push(null);
+      break;
+    }
+    acc += Number(t.cap);
+    tierThresholds.push(acc);
+  }
+  // 物业费无档位时清空阈值（趋势图不画虚线）
+  const isProperty = type === "property";
+
+  // 5. 生成月份行
+  const months = [];
+  for (let m = startM; m <= endM; m++) {
+    months.push({
+      month: m,
+      ym: `${year}-${String(m).padStart(2, "0")}`,
+      usage: 0,
+      amount: 0,
+      tier: 0,
+      hasBill: false,
+      note: "",
+      tierThresholds: isProperty ? null : tierThresholds, // 物业费无档位阈值
+      ruleUnit: activeRule?.unit || null,
+    });
+  }
+
+  // 6. 分配账单数据到各月
   const recs = db
     .prepare(
       `SELECT * FROM utility_records WHERE book_id=?
          AND (type=? OR ?='') AND bill_start<=? AND bill_end>=?
-       ORDER BY bill_start`
+         ORDER BY bill_start`
     )
-    .all(bookId, type, type, yEnd, yStart);
-  const months = Array.from({ length: 12 }, (_, i) => ({
-    month: i + 1,
-    ym: `${year}-${String(i + 1).padStart(2, "0")}`,
-    usage: 0,
-    amount: 0,
-    tier: 0,
-    hasBill: false,
-    note: "",
-  }));
+    .all(bookId, type, type, yearEnd, yearStart);
   for (const rec of recs) {
     const span = recSpan(rec);
     const totalU = Number(rec.usage_total) || 0;
-    const baseU = Math.floor(totalU / span); // 均摊取整：余数归覆盖的最后一个月
+    const baseU = Math.floor(totalU / span);
     const remU = round2(totalU - baseU * span);
-    // 金额每期均分（round2）：同一张账单分到各月金额相等，避免一月多一月少
     const amtPer = round2((Number(rec.paid) || 0) / span);
     const [sY, sM] = String(rec.bill_start).split("-").map(Number);
     const [eY, eM] = String(rec.bill_end).split("-").map(Number);
-    // 本账单覆盖的月份集合（仅取与查询年相交部分）
     const mList = [];
     let cy = sY, cm = sM;
     while (cy < eY || (cy === eY && cm <= eM)) {
@@ -764,7 +814,8 @@ function computeMonths(bookId, type, year) {
       if (mList.length > 48) break;
     }
     for (const m of mList) {
-      const row = months[m - 1];
+      const row = months.find((r) => r.month === m);
+      if (!row) continue; // 跳过不在显示范围（被规则裁剪掉）的月
       const isLast = m === eM && eY === year;
       row.hasBill = true;
       row.tier = Math.max(row.tier, Number(rec.tier_level) || 1);
@@ -793,7 +844,7 @@ r.get(
   requireBook,
   wrap((req, res) => {
     const type = String(req.query.type || "");
-    // 有账单覆盖的年份（跨年账单两端年份都算）
+    // 1. 有账单覆盖的年份（跨年账单两端年份都算）
     const recs = db
       .prepare(
         `SELECT bill_start, bill_end FROM utility_records WHERE book_id=?
@@ -813,7 +864,22 @@ r.get(
         if (++guard > 120) break;
       }
     }
-    const list = [...yearSet].sort((a, b) => b - a).map((year) => {
+    // 2. 加上「规则覆盖的年份」—— 即使该年没账单也要显示（生效范围预览）
+    //    to=null 表示 ∞，按当前年算（避免历史/未来过远年份都被包含）
+    const today = new Date();
+    const thisYear = today.getFullYear();
+    const thisMonth = `${thisYear}-${String(today.getMonth() + 1).padStart(2, "0")}`;
+    const rules = db
+      .prepare(`SELECT effective_from, effective_to FROM utility_rules WHERE book_id=? AND type=?`)
+      .all(req.bookId, type);
+    for (const r of rules) {
+      const t = r.effective_to || `${thisYear}-12`;
+      const fY = Number(r.effective_from.slice(0, 4));
+      const tY = Number(t.slice(0, 4));
+      for (let y = fY; y <= tY; y++) yearSet.add(y);
+    }
+    // 3. 升序（左小右大）
+    const list = [...yearSet].sort((a, b) => a - b).map((year) => {
       const months = computeMonths(req.bookId, type, year);
       let usage = 0, amount = 0, tier = 0, hasBill = false;
       for (const m of months) {

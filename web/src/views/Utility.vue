@@ -55,23 +55,63 @@ const tierClass = (tier) => (tier >= 3 ? "t3" : tier === 2 ? "t2" : "");
 const tierText = (tier) =>
   tier >= 3 ? "第3档" : tier === 2 ? "第2档" : "";
 
-// ---------------- 趋势图（v260908） ----------------
-// 按月视图：当年有账单的月份（用量柱 + 金额折线双轴）；按年视图：历年汇总
+// ---------------- 趋势图（v260908 金额柱+用量折线；v260909 改：物业=金额柱 / 水电气=用量柱 + 档位虚线） ----------------
+// 按月视图：当年有账单的月份（按 type 选柱字段）；按年视图：历年汇总
 const chartRows = computed(() =>
   viewMode.value === "year"
     ? years.value.filter((y) => y.hasBill)
     : months.value.filter((m) => m.hasBill)
 );
+const isProperty = computed(() => segType.value === "property");
+const chartUnit = computed(() => curType.value.unit);
+// 档位阈值：取第一条有账单行的 tierThresholds（同一类型/年内的规则一致；跨年可能变，按行取更准）
+function tierMarkLine(seriesName) {
+  // 收集所有有账单行的非 null 阈值
+  const s = new Set();
+  for (const r of chartRows.value) {
+    if (r.tierThresholds) {
+      for (const t of r.tierThresholds) if (t != null) s.add(t);
+    }
+  }
+  const arr = [...s].sort((a, b) => a - b);
+  if (!arr.length) return undefined;
+  // 第2档=第1个阈值（橙），第3档=第2个阈值（红）
+  return {
+    symbol: "none",
+    silent: true,
+    data: arr.map((v, i) => ({
+      yAxis: v,
+      lineStyle: {
+        type: "dashed",
+        color: i === 0 ? "#f59e0b" : "#ef4444",
+        width: 1,
+      },
+      label: { show: false },
+    })),
+  };
+}
 const chartOpt = computed(() => {
   const rows = chartRows.value;
   if (!rows.length) return null;
   const labels = rows.map((r) =>
-    viewMode.value === "year" ? r.year : `${r.month}月`
+    viewMode.value === "year" ? r.year + "年" : r.month + "月"
   );
-  const usages = rows.map((r) => r.usage || 0);
-  const amounts = rows.map((r) => Number(r.amount || 0).toFixed(2));
-  const t2 = rows.some((r) => r.tier === 2);
-  const t3 = rows.some((r) => r.tier >= 3);
+  // 物业=金额柱；水电气=用量柱
+  const values = rows.map((r) =>
+    isProperty.value ? Number(r.amount || 0) : Number(r.usage || 0)
+  );
+  const mark = tierMarkLine();
+  const series = [
+    {
+      name: isProperty.value ? "金额" : "用量",
+      type: "bar",
+      data: values,
+      barWidth: "38%",
+      itemStyle: { color: isProperty.value ? "#6366f1" : "#10b981", borderRadius: [4, 4, 0, 0] },
+      // 档位虚线（无档位不画；mark=undefined 时不设）
+      ...(mark ? { markLine: mark } : {}),
+    },
+  ];
   return {
     tooltip: {
       trigger: "axis",
@@ -79,24 +119,25 @@ const chartOpt = computed(() => {
         const i = ps[0]?.dataIndex ?? 0;
         const r = rows[i];
         let s = `<b>${labels[i]}</b><br/>`;
-        s += ps
-          .map((p) => `${p.marker}${p.seriesName}：${p.seriesName === "用量" ? (r.usage || 0) + " " + curType.value.unit : "¥" + Number(r.amount || 0).toFixed(2)}`)
-          .join("<br/>");
+        // 物业=只显示金额；水电气=只显示用量（与柱对齐）；不画"金额"列
+        if (isProperty.value) {
+          s += `${ps[0].marker} 金额：¥${Number(r.amount || 0).toFixed(2)}`;
+        } else {
+          const u = Number(r.usage || 0);
+          s += `${ps[0].marker} 用量：${u} ${chartUnit.value}`;
+        }
         if (r.tier >= 2) s += `<br/><span style="color:${r.tier >= 3 ? "#ef4444" : "#f59e0b"}">● 第${r.tier}档</span>`;
         return s;
       },
     },
-    legend: { data: ["金额", "用量"], top: 0 },
-    grid: { left: 54, right: 46, top: 34, bottom: 26 },
-    xAxis: { type: "category", data: labels },
-    yAxis: [
-      { type: "value", name: "金额(¥)" },
-      { type: "value", name: `用量(${curType.value.unit})`, splitLine: { show: false } },
-    ],
-    series: [
-      { name: "金额", type: "bar", data: amounts, barWidth: "40%", itemStyle: { color: "#6366f1", borderRadius: [4, 4, 0, 0] } },
-      { name: "用量", type: "line", yAxisIndex: 1, data: usages, smooth: true, symbolSize: 6, itemStyle: { color: "#f59e0b" }, lineStyle: { width: 2 } },
-    ],
+    grid: { left: 50, right: 18, top: 16, bottom: 24 },
+    xAxis: { type: "category", data: labels, axisLine: { lineStyle: { color: "var(--border, #e5e7eb)" } } },
+    yAxis: {
+      type: "value",
+      name: isProperty.value ? "金额(¥)" : `用量(${chartUnit.value})`,
+      splitLine: { lineStyle: { color: "var(--border, #e5e7eb)" } },
+    },
+    series,
   };
 });
 // 数据点告警标注（不参与渲染，仅提示）
@@ -351,28 +392,29 @@ watch(year, refresh);
 
     <div v-else-if="loading" class="card muted">加载中…</div>
     <template v-else>
-      <!-- v260908：趋势图（金额柱 + 用量折线） -->
+      <!-- v260909：趋势图（物业=金额柱 / 水电气=用量柱 + 档位虚线） -->
       <div class="card" style="padding: 14px 16px; margin-bottom: 12px" v-if="chartOpt">
-        <div class="section-title" style="margin-bottom: 4px">
-          {{ viewMode === "month" ? year + " 年趋势" : "历年趋势" }}（柱=金额 · 线=用量）
+        <div class="section-title" style="margin-bottom: 6px">
+          {{ viewMode === "month" ? year + " 年趋势" : "历年趋势" }}（柱={{ isProperty ? "金额" : "用量" }}{{ chartOpt.series[0]?.markLine ? " · 虚线=档位" : "" }}）
         </div>
         <EChart :option="chartOpt" height="210px" />
       </div>
 
-      <!-- 按年：历年汇总行 -->
+      <!-- 按年：历年汇总行（等距 4 列：年份-用量-档位-金额） -->
       <div v-if="viewMode === 'year'" class="card month-card">
         <div v-for="y in years" :key="y.year" :class="['month-row', tierClass(y.tier), { off: !y.hasBill }]" @click="y.hasBill && viewYear(y.year)">
-          <span class="m-name">{{ y.year }}年</span>
-          <span class="m-usage">{{ y.hasBill ? y.usage : "—" }}<em class="unit">{{ y.hasBill ? curType.unit : "" }}</em></span>
-          <span class="m-amt">{{ fmtAmount(y.amount) }}</span>
-          <span v-if="tierText(y.tier)" class="tier-badge" :class="tierClass(y.tier)">{{ tierText(y.tier) }}</span>
-          <span v-else-if="y.hasBill" class="muted dot">›</span>
-          <span v-else class="muted dot">·</span>
+          <span class="col-name">{{ y.year }}年</span>
+          <span class="col-usage">{{ y.hasBill ? y.usage : "—" }}<em class="unit">{{ y.hasBill ? curType.unit : "" }}</em></span>
+          <span class="col-tier">
+            <span v-if="tierText(y.tier)" class="tier-badge" :class="tierClass(y.tier)">{{ tierText(y.tier) }}</span>
+            <span v-else class="muted slot">—</span>
+          </span>
+          <span class="col-amt">{{ fmtAmount(y.amount) }}</span>
         </div>
         <div v-if="!years.length" class="muted" style="padding: 14px 4px">还没有任何账单</div>
       </div>
 
-      <!-- 按月：某年 12 个月行 -->
+      <!-- 按月：等距 4 列（月份-用量-档位-金额；第1档不显示但位置留出） -->
       <div v-else class="card month-card">
         <div
           v-for="m in months"
@@ -380,12 +422,14 @@ watch(year, refresh);
           :class="['month-row', tierClass(m.tier), { off: !m.hasBill }]"
           @click="m.hasBill && openDetail(m.month)"
         >
-          <span class="m-name">{{ m.month }}月</span>
-          <span class="m-usage">{{ fmtUsage(m) }}<em class="unit">{{ m.hasBill ? curType.unit : "" }}</em></span>
-          <span class="m-amt">{{ fmtAmount(m.amount) }}</span>
-          <span v-if="tierText(m.tier)" class="tier-badge" :class="tierClass(m.tier)">{{ tierText(m.tier) }}</span>
-          <span v-else-if="m.note" class="pend">{{ m.note }}</span>
-          <span v-else class="muted dot">·</span>
+          <span class="col-name">{{ m.month }}月</span>
+          <span class="col-usage">{{ fmtUsage(m) }}<em class="unit">{{ m.hasBill ? curType.unit : "" }}</em></span>
+          <span class="col-tier">
+            <span v-if="tierText(m.tier)" class="tier-badge" :class="tierClass(m.tier)">{{ tierText(m.tier) }}</span>
+            <span v-else-if="m.note" class="pend">{{ m.note }}</span>
+            <span v-else class="muted slot">—</span>
+          </span>
+          <span class="col-amt">{{ fmtAmount(m.amount) }}</span>
         </div>
       </div>
     </template>
@@ -502,7 +546,8 @@ watch(year, refresh);
 
 .no-rule { border-left: 4px solid var(--primary); }
 .month-card { padding: 8px 14px; }
-.month-row { display: flex; align-items: center; gap: 10px; padding: 11px 10px; border-radius: 10px; cursor: pointer; border-bottom: 1px solid var(--border); }
+/* v260909：4 列等距（月份-用量-档位-金额），档位列空时占位保持对齐 */
+.month-row { display: grid; grid-template-columns: 1fr 1.4fr 1fr 1.4fr; align-items: center; padding: 11px 10px; border-radius: 10px; cursor: pointer; border-bottom: 1px solid var(--border); }
 .month-row:last-child { border-bottom: none; }
 .month-row:hover { background: var(--surface-2); }
 .month-row.off { opacity: 0.45; cursor: default; }
@@ -511,17 +556,18 @@ watch(year, refresh);
 .month-row.t2:hover { background: rgba(245, 158, 11, 0.16); }
 .month-row.t3 { background: rgba(239, 68, 68, 0.10); box-shadow: inset 3px 0 0 var(--expense, #ef4444); }
 .month-row.t3:hover { background: rgba(239, 68, 68, 0.16); }
-.m-name { width: 46px; font-weight: 600; }
-.m-usage { flex: 1; font-size: 17px; font-weight: 700; }
-.m-usage .unit { font-size: 11px; font-weight: 400; color: var(--text-2); margin-left: 3px; font-style: normal; }
-.m-amt { width: 110px; text-align: right; font-weight: 600; }
-.tier-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 700; }
+.col-name { font-weight: 600; padding-left: 4px; }
+.col-usage { font-size: 17px; font-weight: 700; text-align: right; padding-right: 12px; }
+.col-usage .unit { font-size: 11px; font-weight: 400; color: var(--text-2); margin-left: 3px; font-style: normal; }
+.col-tier { text-align: center; }
+.col-amt { text-align: right; font-weight: 600; padding-right: 4px; }
+.tier-badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 700; min-width: 38px; text-align: center; }
 .tier-badge.t2 { background: #f59e0b; color: #fff; }
 .tier-badge.t3 { background: var(--expense, #ef4444); color: #fff; }
-.month-row.t3 .m-usage, .month-row.t3 .m-amt { color: var(--expense, #ef4444); }
+.month-row.t3 .col-usage, .month-row.t3 .col-amt { color: var(--expense, #ef4444); }
+.slot { color: transparent; user-select: none; }  /* 占位保持对齐 */
 .pend { font-size: 12px; color: var(--expense, #ef4444); font-weight: 600; }
 .pend.ok { color: #10b981; font-weight: 500; }
-.dot { font-size: 16px; }
 
 .bill-head { display: flex; justify-content: space-between; gap: 16px; background: var(--surface-2); border-radius: 10px; padding: 12px 14px; margin-bottom: 8px; }
 .kv { margin: 3px 0; font-size: 13px; }
