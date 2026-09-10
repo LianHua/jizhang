@@ -3,6 +3,7 @@ import { ref, reactive, computed, onMounted } from "vue";
 import api from "../api.js";
 import { useStore } from "../store.js";
 import { toast } from "../toast.js";
+import { applyNavCustom, NAV_ORDER_KEY, NAV_NAMES_KEY } from "../nav.js";
 
 const store = useStore();
 const nickname = ref(store.user?.nickname || "");
@@ -141,39 +142,17 @@ async function savePwd() {
 }
 
 // ---------------- 导航栏自定义（顺序 + 改名，存 localStorage） ----------------
-const ALL_NAV = [
-  { name: "dashboard", label: "首页", icon: "🏠" },
-  { name: "flows", label: "流水", icon: "📒" },
-  { name: "stats", label: "统计", icon: "📊" },
-  { name: "budgets", label: "预算", icon: "🎯" },
-  { name: "ai", label: "AI记账", icon: "✨" },
-  { name: "import", label: "导入", icon: "📥" },
-  { name: "books", label: "账本", icon: "📚" },
-  { name: "categories", label: "分类", icon: "🏷️" },
-  { name: "presets", label: "常用名称", icon: "🔖" },
-  { name: "bills", label: "账单", icon: "🧾" },
-  { name: "savings", label: "存款目标", icon: "🏁" },
-  { name: "wallets", label: "分类钱包", icon: "👝" },
-  { name: "users", label: "用户管理", icon: "👥", admin: true },
-  { name: "settings", label: "设置", icon: "⚙️" },
-];
-const NAV_ORDER_KEY = "jizhang_nav_order";
-const NAV_NAMES_KEY = "jizhang_nav_names";
+// 导航项统一来自 nav.js（与 Layout.vue 侧边栏共用同一份列表，避免漂移）
 const navItems = ref([]);
 function loadNav() {
-  let order = [];
-  let names = {};
+  let custom = { order: null, names: {} };
   try {
-    order = JSON.parse(localStorage.getItem(NAV_ORDER_KEY) || "[]");
-    names = JSON.parse(localStorage.getItem(NAV_NAMES_KEY) || "{}");
+    custom = {
+      order: JSON.parse(localStorage.getItem(NAV_ORDER_KEY) || "[]"),
+      names: JSON.parse(localStorage.getItem(NAV_NAMES_KEY) || "{}"),
+    };
   } catch {}
-  const byName = Object.fromEntries(ALL_NAV.map((n) => [n.name, n]));
-  const ordered = order.map((nm) => byName[nm]).filter(Boolean);
-  const rest = ALL_NAV.filter((n) => !order.includes(n.name));
-  navItems.value = [...ordered, ...rest].map((n) => ({
-    ...n,
-    label: names[n.name] || n.label,
-  }));
+  navItems.value = applyNavCustom(custom);
 }
 function saveNav() {
   localStorage.setItem(NAV_ORDER_KEY, JSON.stringify(navItems.value.map((n) => n.name)));

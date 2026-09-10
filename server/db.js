@@ -234,6 +234,14 @@ const addedBudgetsSort = addColumnIfMissing(
   "sort",
   "sort INTEGER NOT NULL DEFAULT 0"
 );
+
+// 流水来源标记：'' = 手动记账，'ai' = AI 识别记账，'auto' = 通知自动记账
+// ⚠️ 必须在下面的 source 回填 UPDATE 之前执行！
+// 全新库的 flows 建表模板里没有 source 列（靠这里补），若先跑下面的
+// UPDATE flows SET source=... 会直接抛 SqliteError: no such column: source，
+// 导致服务启动失败、容器无限重启（v2.2.19 修复）。
+addColumnIfMissing("flows", "source", "source TEXT NOT NULL DEFAULT ''");
+
 // 老数据一次性回填 source（v260823-2335 之前 server 没保存 source 字段）
 // 根据 payment_method 推断 AI 自动记账：只跑一次，只更新当前 source 为空的记录
 // （不能放在每次 GET /flows 时推断——会覆盖用户隐藏操作）
@@ -259,8 +267,7 @@ db.exec(
   "CREATE INDEX IF NOT EXISTS idx_flows_attr_uid ON flows(book_id, attribution_uid)"
 );
 
-// 流水来源标记：'' = 手动记账，'ai' = AI 识别记账，'auto' = 通知自动记账
-addColumnIfMissing("flows", "source", "source TEXT NOT NULL DEFAULT ''");
+// 流水来源标记（见上方 addColumnIfMissing("flows","source",...) —— 已在回填前加列）
 
 // 离线同步支持：updated_at 记录最后修改时间（增量拉取用）；
 // client_uuid 为客户端幂等键（离线补传去重，按 (book_id, client_uuid) 唯一）

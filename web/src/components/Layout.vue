@@ -4,6 +4,7 @@ import { useRouter, useRoute } from "vue-router";
 import { useStore } from "../store.js";
 import { toast } from "../toast.js";
 import api from "../api.js";
+import { applyNavCustom, loadNavCustom } from "../nav.js";
 
 const store = useStore();
 const router = useRouter();
@@ -13,54 +14,12 @@ const menuOpen = ref(false);
 // 版本号：构建时由服务端 /api/meta 下发（如 v260821-1128），显示在顶部「记账本」右侧
 const version = ref("");
 
-const allNav = [
-  { name: "dashboard", label: "首页", icon: "🏠" },
-  { name: "flows", label: "流水", icon: "📒" },
-  { name: "stats", label: "统计", icon: "📊" },
-  { name: "budgets", label: "预算", icon: "🎯" },
-  { name: "ai", label: "AI记账", icon: "✨" },
-  { name: "import", label: "导入", icon: "📥" },
-  { name: "trash", label: "回收站", icon: "🗑️" },
-  { name: "books", label: "账本", icon: "📚" },
-  { name: "categories", label: "分类", icon: "🏷️" },
-  { name: "presets", label: "常用名称", icon: "🔖" },
-  { name: "bills", label: "账单", icon: "🧾" },
-  { name: "utility", label: "水电气", icon: "🚰" },
-  { name: "savings", label: "存款目标", icon: "🏁" },
-  { name: "wallets", label: "分类钱包", icon: "👝" },
-  { name: "users", label: "用户管理", icon: "👥", admin: true },
-  { name: "settings", label: "设置", icon: "⚙️" },
-];
-const NAV_ORDER_KEY = "jizhang_nav_order";
-const NAV_NAMES_KEY = "jizhang_nav_names";
-
-// 导航自定义（顺序 + 改名）存 localStorage：设置页里可调整
-function loadNavCustom() {
-  try {
-    const order = JSON.parse(localStorage.getItem(NAV_ORDER_KEY) || "null");
-    const names = JSON.parse(localStorage.getItem(NAV_NAMES_KEY) || "{}");
-    return { order, names };
-  } catch {
-    return { order: null, names: {} };
-  }
-}
-function applyNavCustom() {
-  const { order, names } = loadNavCustom();
-  let list = [...allNav];
-  if (Array.isArray(order) && order.length) {
-    const byName = Object.fromEntries(list.map((n) => [n.name, n]));
-    const ordered = order.map((nm) => byName[nm]).filter(Boolean);
-    const rest = list.filter((n) => !order.includes(n.name));
-    list = [...ordered, ...rest];
-  }
-  return list.map((n) => ({
-    ...n,
-    label: names[n.name] || n.label,
-  }));
-}
-// 「用户管理」只对管理员显示；顺序/名称按自定义
+// 导航项统一来自 nav.js（与设置页「导航栏管理」共用，避免两处列表漂移）
+// 「用户管理」只对管理员显示；顺序/名称按 localStorage 自定义
 const nav = computed(() =>
-  applyNavCustom().filter((n) => !n.admin || store.user?.role === "admin")
+  applyNavCustom(loadNavCustom()).filter(
+    (n) => !n.admin || store.user?.role === "admin"
+  )
 );
 
 onMounted(async () => {
