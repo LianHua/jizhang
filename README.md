@@ -41,8 +41,12 @@
 
 ## 一、部署到飞牛 NAS（推荐：拉预编译镜像，无需在 NAS 编译）
 
-镜像由 GitHub Actions 自动构建并发布到 GitHub 容器仓库 **GHCR**：
-`ghcr.io/h223492759/jizhang:latest`（多架构 amd64 / arm64，已设为公开）。
+镜像由 GitHub Actions 自动构建，**同时**发布到 Docker Hub 和 GitHub 容器仓库（GHCR），两者同名同内容，多架构 amd64 / arm64：
+
+- `h223492759/jizhang:latest` —— 仓库自带的 `docker-compose.yml` 用的就是这个（Docker Hub）
+- `ghcr.io/h223492759/jizhang:latest` —— 备选，想换在 compose 里改 `image` 即可
+
+两者都带 `latest` 与具体版本号 tag（如 `v260910-1804`）。**想固定版本、避免 `latest` 意外升级，就用版本号 tag。**
 你在飞牛上只要拉这个现成镜像跑起来，**不需要在 NAS 上装依赖、编译 SQLite**，比原项目还简单（单容器，连数据库容器都不要）。
 
 ### 第 1 步：配置镜像源（关键，否则拉不下来）
@@ -57,9 +61,9 @@
 
 ### 第 2 步：准备两个文件
 
-在 NAS 上建一个目录（例如 `/vol1/1000/docker/jizhang`），放进去：
+在 NAS 上建一个目录（示例：`/vol1/1000/docker/jizhang`），放进去：
 
-- `docker-compose.yml`（仓库里已写好，直接拉 `ghcr.io/h223492759/jizhang:latest`）
+- `docker-compose.yml`（仓库里已写好，默认拉 `h223492759/jizhang:latest`）
 - `.env`（复制 `.env.example` 改名，至少改 `JWT_SECRET` 和 `ADMIN_PASSWORD`）
 
 ```ini
@@ -70,12 +74,16 @@ ADMIN_PASSWORD=你的强密码
 
 > 不用传 `Dockerfile`、`server/`、`web/` 这些——镜像是现成的，只要 compose + .env。
 
+> ⚠️ **目录名只以你自己的为准，别照抄示例路径**。飞牛的共享文件夹可能是 `Docker`（大写）也可能是 `docker`（小写），还有 `/vol1`、`/vol2` 之分；写错了 Docker 会按你写的宿主路径**新建一个目录**，数据就跑到那儿去了。
+> 怎么确认真实位置：Docker → 容器 → 点已有容器 → 看它的**挂载/存储位置**。
+> 好在本 compose 用的是**相对路径** `./data:/app/data`，数据永远落在你选的那个项目目录下的 `data/`，不会另建目录——所以你只需要改 `.env`，`volumes` 不用动。
+
 ### 第 3 步：启动
 
 **方式 A —— 终端（最快）**
 
 ```bash
-cd /vol1/1000/docker/jizhang
+cd /vol1/1000/docker/jizhang      # 换成你自己的目录
 docker compose up -d
 ```
 
@@ -106,7 +114,7 @@ http://你的NAS内网IP:9600
 ## 二、常用运维命令
 
 ```bash
-cd /vol1/1000/docker/jizhang-nas
+cd /vol1/1000/docker/jizhang      # 换成你自己的目录
 
 docker compose logs -f          # 看实时日志
 docker compose restart          # 重启
@@ -124,7 +132,7 @@ docker compose ps               # 查看状态（healthy 表示健康检查通�
 所有数据只有一个 SQLite 文件，位置在宿主机：
 
 ```
-jizhang-nas/data/jizhang.db
+<项目目录>/data/jizhang.db
 ```
 
 **备份**：停容器后直接复制整个 `data` 目录即可（含 `.db-wal`、`.db-shm`）。
@@ -255,17 +263,24 @@ npm run dev          # http://localhost:5173，已配置代理到后端
 改 `docker-compose.yml` 里 `ports` 冒号左边的数字，比如 `"9700:9600"`，然后访问 9700。
 
 **Q：拉镜像报 `context deadline exceeded` / `403` / `401`？**
-说明镜像源没配对。现在拉的是 GHCR 镜像，同样需要镜像源代理 ghcr.io。确保飞牛镜像源只保留 `https://docker.1panel.dev`（它同时代理 docker.io 与 ghcr.io），删掉 `xuanyuan.me`(429) / `docker.fnnas.com`(401) / 个人阿里云加速器(403) 这些失效源，并**重启 Docker / NAS** 后重试。
+说明镜像源没配对。镜像在 Docker Hub（`h223492759/jizhang`）和 GHCR（`ghcr.io/h223492759/jizhang`）各有一份，走哪个都需要镜像源代理对应的域名。确保飞牛镜像源只保留 `https://docker.1panel.dev`（它同时代理 docker.io 与 ghcr.io），删掉 `xuanyuan.me`(429) / `docker.fnnas.com`(401) / 个人阿里云加速器(403) 这些失效源，并**重启 Docker / NAS** 后重试。
 
 **Q：想更新到最新版？**
 `docker compose pull && docker compose up -d` 即可拉新镜像重启（数据在 `./data` 不受影响）。镜像由 GitHub Actions 在每次推送到 `main` 时自动重新构建发布。
 
 **Q：我想自己改代码后重新构建镜像？**
-方式一：把改动推到 GitHub `main` 分支，Actions 会自动构建并覆盖 `ghcr.io/h223492759/jizhang:latest`。
+方式一：把改动推到 GitHub `main` 分支，Actions 会自动构建并覆盖 `h223492759/jizhang:latest` 与 `ghcr.io/h223492759/jizhang:latest`。
 方式二（纯本地）：保留 `Dockerfile`，在目录内 `docker compose up -d --build`；此时需要 NAS 能拉到 `node:22-bookworm-slim` 基础镜像（走镜像源），且编译 SQLite 需要一点时间和内存。
 
 **Q：忘记管理员密码？**
 停容器 → 删掉 `data/jizhang.db` 会连数据一起没（慎用）。更稳妥的做法是在 `.env` 里改 `ADMIN_USERNAME` 为一个新名字重启，会创建一个新管理员账号，登录后再处理旧账号。
+
+**Q：数据目录跑到了别处 / 多出一个 `docker` 目录？**
+`volumes` 若写成绝对路径（如 `/vol1/1000/docker/jizhang/data:/app/data`），Docker 会**按字面新建**这个宿主目录——飞牛的共享文件夹是 `Docker`（大写）而路径写成 `docker`（小写）时，就会凭空多出一个新目录，数据也跟着过去。
+**建议保持仓库默认的相对路径 `./data:/app/data`**：数据落在你选的项目目录下，与盘符、大小写、存储空间编号都无关。已经写死过的：停容器 → 把新目录里的 `data` 移回正确位置（或在正确目录重建项目）→ 再启动。
+
+**Q：想再部署一个空白实例（测试 / 给家人用）？**
+同一个镜像靠 4 项隔离即可：`container_name` 改名、宿主端口换 `9601`、数据目录换新、`JWT_SECRET` 换新。详见仓库内 `deploy-second-instance.md`。
 
 **Q：想让外网访问？**
 用飞牛自带的内网穿透 / 反向代理，把 `9600` 端口映射出去，并**务必**先把 `ALLOW_REGISTER` 改成 `false`、密码设强一点。
@@ -275,7 +290,7 @@ npm run dev          # http://localhost:5173，已配置代理到后端
 ## 目录结构
 
 ```
-jizhang-nas/
+jizhang/
 ├── Dockerfile              # 多阶段构建：前端打包 → 后端依赖 → 精简运行镜像
 ├── docker-compose.yml      # 飞牛一键部署
 ├── .env.example            # 环境变量模板
