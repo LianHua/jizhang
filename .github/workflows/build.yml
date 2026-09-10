@@ -22,8 +22,106 @@ env:
   IMAGE_NAME: jizhang
 
 jobs:
+  # ---------------------------------------------------------------
+  # 全新部署冒烟：用【空数据卷】跑真容器，1:1 复现 NAS 上首次
+  # `docker compose up -d` 的场景。任何「空库启动即崩」的问题
+  # （如 v2.2.19 的 flows.source 列顺序 bug）都会在这里被拦住，
+  # 不让坏镜像推到 Docker Hub。
+  # ---------------------------------------------------------------
+  smoke:
+    name: 全新部署冒烟（空数据卷）
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 构建 amd64 测试镜像（不推送）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: jizhang:fresh-smoke
+          build-args: |
+            APP_VERSION=smoke
+          cache-from: type=gha
+
+      - name: 空数据卷启动 → 健康检查 → 写入 → 重启，全程断言
+        run: |
+          set -euo pipefail
+          docker rm -f jz-smoke 2>/dev/null || true
+          docker volume rm jz-smoke-data 2>/dev/null || true
+          docker volume create jz-smoke-data >/dev/null
+
+          # 全新空卷 = 首次部署
+          docker run -d --name jz-smoke -p 9611:9600 \
+            -e JWT_SECRET=smoke-secret \
+            -e ADMIN_USERNAME=admin \
+            -e ADMIN_PASSWORD=admin123 \
+            -v jz-smoke-data:/app/data \
+            jizhang:fresh-smoke
+
+          wait_health() {
+            for i in $(seq 1 60); do
+              if curl -sf http://127.0.0.1:9611/api/health >/dev/null 2>&1; then return 0; fi
+              if [ "$(docker inspect -f '{{.State.Running}}' jz-smoke 2>/dev/null)" != "true" ]; then
+                echo "❌ 容器已退出（无限重启）"; docker logs jz-smoke; return 1
+              fi
+              sleep 2
+            done
+            echo "❌ 健康检查超时"; docker logs jz-smoke; return 1
+          }
+
+          echo "=== 首次启动 ==="
+          wait_health
+          docker logs jz-smoke
+
+          # 版本号必须来自镜像内 /app/VERSION
+          curl -sf http://127.0.0.1:9611/api/meta; echo
+
+          echo "=== 登录 + 记一笔流水（真实写入路径）==="
+          TOKEN=$(curl -sf -X POST -H 'Content-Type: application/json' \
+            -d '{"username":"admin","password":"admin123"}' \
+            http://127.0.0.1:9611/api/auth/login \
+            | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+          curl -sf -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+            -d '{"bookId":1,"type":"expense","amount":9.9,"category":"餐饮","description":"ci-smoke","payment_method":"现金","flow_time":"2026-09-10 12:00:00"}' \
+            "http://127.0.0.1:9611/api/flows?bookId=1"
+          echo
+          curl -sf -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9611/api/flows?bookId=1&pageSize=5" \
+            | python3 -c 'import sys,json;d=json.load(sys.stdin);assert d["list"], "写入的流水读不回来";print("流水读回 OK, total =", d["total"])'
+          curl -sf -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9611/api/utility/rules?bookId=1" >/dev/null
+          curl -sf -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9611/api/stats/overview?bookId=1&month=2026-09" >/dev/null
+          echo "核心接口 OK"
+
+          echo "=== 重启容器（模拟 NAS 上 docker compose up -d 重跑）==="
+          docker restart jz-smoke
+          wait_health
+          curl -sf -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:9611/api/flows?bookId=1&pageSize=5" \
+            | python3 -c 'import sys,json;d=json.load(sys.stdin);assert d["total"]==1, "重启后数据不一致: %s" % d["total"];print("重启后数据仍在 OK")'
+
+          echo "=== 启动日志异常断言 ==="
+          LOGS=$(docker logs jz-smoke 2>&1)
+          echo "$LOGS"
+          if echo "$LOGS" | grep -E "SqliteError|no such column|no such table|校准失败|启动生成失败|启动重建失败|UnhandledPromiseRejection|Error:"; then
+            echo "❌ 启动日志出现异常/降级警告"; exit 1
+          fi
+          echo "✅ 全新部署冒烟全部通过"
+
+      - name: 清理
+        if: ${{ always() }}
+        run: |
+          docker logs jz-smoke > /tmp/smoke-final.log 2>&1 || true
+          docker rm -f jz-smoke 2>/dev/null || true
+          docker volume rm jz-smoke-data 2>/dev/null || true
+
   build:
     runs-on: ubuntu-latest
+    needs: smoke          # 全新部署冒烟不过 → 不推镜像
     steps:
       - name: Checkout
         uses: actions/checkout@v4
