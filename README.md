@@ -5,6 +5,8 @@
 单容器 + SQLite 的个人/家庭记账应用，专为**飞牛 NAS（fnOS）**部署设计。
 一个 `docker compose up` 就跑起来，不需要额外的数据库容器。
 
+安卓端APP项目地址：https://github.com/h223492759/jizhang-android
+
 本人不会代码，全部由我提需求发现bug，workbuddy提交代码并发布
 ---
 
