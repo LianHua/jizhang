@@ -10,6 +10,11 @@
 本人不会代码，全部由我提需求发现bug，workbuddy提交代码并发布
 ---
 
+软件截图
+<img width="960" height="467" alt="image" src="https://github.com/user-attachments/assets/7bac851f-587f-488b-9685-6ee1b4a0e894" />
+
+
+
 ## 功能一览
 
 | 模块 | 说明 |
