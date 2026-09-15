@@ -244,13 +244,24 @@ async function fetchDetail() {
   const q = {
     ...detailPeriod.value,
     type: detailType.value,
-    pageSize: 300,
   };
   if (detail.value.dim && detail.value.name) q[detail.value.dim] = detail.value.name;
   try {
-    const { data } = await api.get("/flows", { params: q });
-    detail.value.rows = data.list;
-    detail.value.total = data.total;
+    // v2.2.1：服务端单页上限 200 条——之前只拉一页，合计是对已加载行求和，
+    // 周期内流水超过 200 条时与饼图金额对不上；改为循环翻页拿全量。
+    const pageSize = 200;
+    let page = 1;
+    let total = 0;
+    const rows = [];
+    for (;;) {
+      const { data } = await api.get("/flows", { params: { ...q, page, pageSize } });
+      total = data.total;
+      rows.push(...data.list);
+      if (!data.list.length || rows.length >= total) break;
+      page += 1;
+    }
+    detail.value.rows = rows;
+    detail.value.total = total;
   } catch (e) {
     toast(e.message);
   } finally {
