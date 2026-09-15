@@ -196,10 +196,15 @@ async function saveEditHist(h) {
 const showUpdate = ref(false);
 const updForm = ref([]);
 const updDate = ref(new Date().toLocaleDateString("sv-SE")); // YYYY-MM-DD（本地时区），默认今天
+// 预填来源：非空表示金额取自「某次历史回填的保存值」，空表示取自当前余额
+const updPrefillYmd = ref("");
 function openUpdate() {
   if (!data.value.items.length) return toast("请先新增资金细则");
   updDate.value = new Date().toLocaleDateString("sv-SE");
-  updForm.value = data.value.items.map((i) => ({ id: i.id, name: i.name, sign: i.sign, amount: String(i.amount) }));
+  // 预填「最近一次保存的金额」而不是当前余额：历史回填只写快照、不改当前余额，
+  // 用当前余额会显示更早的旧值（与页面顶部「当前净资产」对不上）
+  updForm.value = data.value.items.map((i) => ({ id: i.id, name: i.name, sign: i.sign, amount: String(i.last_amount ?? i.amount) }));
+  updPrefillYmd.value = (data.value.items.find((i) => i.last_amount_ymd) || {}).last_amount_ymd || "";
   showUpdate.value = true;
 }
 // 弹窗内实时预览本次将得到的净资产
@@ -665,6 +670,9 @@ async function saveHistEdit() {
             <DateInput v-model="updDate" />
           </label>
           同一个月多次更新，历史里只保留该月最后一次的数据。
+          <span v-if="updPrefillYmd" style="color:var(--text-secondary)">
+            已按 <b>{{ updPrefillYmd }}</b> 最后一次保存的金额预填。
+          </span>
         </div>
         <div class="upd-list">
           <div v-for="it in updForm" :key="it.id" class="upd-row">

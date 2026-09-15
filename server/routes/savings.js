@@ -145,7 +145,7 @@ function dataStartYm(bookId) {
 // 过滤掉早于「最早生效日期」所在月的记录（图表与历史记录表共用，保证都不显示之前的数据）
 function monthlyHistory(bookId) {
   const startYm = dataStartYm(bookId);
-  let sql = `SELECT h.ymd, substr(h.ymd,1,7) AS month, h.asset, h.liability, h.net,
+  let sql = `SELECT h.ymd, substr(h.ymd,1,7) AS month, h.asset, h.liability, h.net, h.manual,
               ${OP_EXPR("h")} AS op_user
        FROM savings_history h
        JOIN (
@@ -162,6 +162,31 @@ function monthlyHistory(bookId) {
   return db.prepare(sql).all(...params);
 }
 
+// 「更新资产和负债」弹窗的预填金额口径：与页面顶部「当前净资产」显示的那套逐条金额保持一致。
+// - 最新月快照是人工回填（manual=1，来自「修改某月历史」或选历史日期回填）→ 取该月人工回填的逐条金额；
+//   （历史回填只写快照与逐条历史、不改当前余额，若预填用当前余额就会显示更早的旧值）
+// - 否则（最新月是自动快照，由当前余额重建而来）→ 直接用当前余额 amount
+// 返回 { itemId: { amount, ymd } }
+function lastAmountMap(bookId, months) {
+  const map = {};
+  const latest = months.length ? months[months.length - 1] : null;
+  if (!latest || Number(latest.manual) !== 1) return map;
+  const ym = String(latest.month || "").slice(0, 7);
+  if (!/^\d{4}-\d{2}$/.test(ym)) return map;
+  const rows = db
+    .prepare(
+      `SELECT item_id, ymd, amount FROM savings_item_history
+       WHERE book_id=? AND substr(ymd,1,7)=? AND note LIKE '批量更新·回填历史%'
+       ORDER BY ymd DESC, id DESC`
+    )
+    .all(bookId, ym);
+  for (const r of rows) {
+    if (map[r.item_id]) continue; // 同月多条只取最新一条
+    map[r.item_id] = { amount: Number(r.amount) || 0, ymd: r.ymd };
+  }
+  return map;
+}
+
 // 总览：目标 + 细则 + 当前净资产 + 按月历史
 r.get(
   "/",
@@ -174,9 +199,20 @@ r.get(
     const cur = computeNet(req.bookId);
     const months = monthlyHistory(req.bookId);
     const percent = goal.target > 0 ? Math.round((cur.net / goal.target) * 100) : 0;
+    // 每条细则附带「最近一次保存的金额」，供「更新资产和负债」弹窗预填（口径见 lastAmountMap）
+    const lastMap = lastAmountMap(req.bookId, months);
+    const withLast = (list) =>
+      list.map((it) => {
+        const last = lastMap[it.id];
+        return {
+          ...it,
+          last_amount: last ? last.amount : Number(it.amount) || 0,
+          last_amount_ymd: last ? last.ymd : "",
+        };
+      });
     res.json({
       goal,
-      items,
+      items: withLast(items),
       expiredItems,
       current: { ...cur, percent, remaining: goal.target - cur.net },
       months,
