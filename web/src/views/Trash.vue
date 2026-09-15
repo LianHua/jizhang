@@ -9,7 +9,8 @@ const loading = ref(true);
 async function load() {
   loading.value = true;
   try {
-    const { data } = await api.get("/flows/trash");
+    // 回收站列表不分页：默认 200 条会看不见更早删除的流水，显式拉满（服务端上限 2000）
+    const { data } = await api.get("/flows/trash", { params: { limit: 2000 } });
     list.value = data.list || [];
   } catch (e) {
     toast(e.message);

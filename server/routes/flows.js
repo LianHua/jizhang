@@ -528,7 +528,7 @@ r.get(
   "/trash",
   requireBook,
   wrap((req, res) => {
-    const limit = Math.min(Number(req.query.limit) || 200, 500);
+    const limit = Math.min(Number(req.query.limit) || 500, 2000);
     const list = db
       .prepare(
         `SELECT t.id, t.type, t.amount, t.category, t.description, t.payment_method,

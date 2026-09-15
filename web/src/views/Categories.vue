@@ -20,11 +20,23 @@ const editDlg = ref({ open: false, flow: null, description: '', amount: '', paym
 async function showFlows(c) {
   flowDlg.value = { open: true, category: c, type: c.type, flows: [], loading: true, total: 0, sort: 'time', order: 'desc', selectedId: null };
   try {
-    const { data } = await api.get("/flows", {
-      params: { type: c.type, category: c.name, pageSize: 200, sortBy: 'flow_time', order: 'desc' },
-    });
-    flowDlg.value.flows = data.list;
-    flowDlg.value.total = data.total;
+    // v2.2.2：循环翻页取全量——只拉一页（200 条）时，弹窗内的排序/top 只在这 200 条内进行，
+    // 分类下流水较多时会漏掉更早的记录
+    const pageSize = 200;
+    let page = 1;
+    let total = 0;
+    const rows = [];
+    for (;;) {
+      const { data } = await api.get("/flows", {
+        params: { type: c.type, category: c.name, page, pageSize, sortBy: 'flow_time', order: 'desc' },
+      });
+      total = data.total;
+      rows.push(...(data.list || []));
+      if (!data.list?.length || rows.length >= total) break;
+      page += 1;
+    }
+    flowDlg.value.flows = rows;
+    flowDlg.value.total = total;
   } catch (e) { toast(e.message); }
   finally { flowDlg.value.loading = false; }
 }

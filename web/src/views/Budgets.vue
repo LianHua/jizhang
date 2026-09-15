@@ -210,14 +210,26 @@ async function onChartClick(params) {
   detailLoading.value = true;
   detailList.value = [];
   try {
-    const { data } = await api.get("/flows", {
-      params: {
-        category: names.join(','),
-        start: `${ym}-01`, end: `${ym}-31`,
-        pageSize: 200, sortBy: "flow_time", order: "asc",
-      },
-    });
-    detailList.value = data.list || [];
+    // v2.2.2：循环翻页取全量——服务端单页上限 200，只拉一页时下方「合计」
+    // 是对已加载行求和，会小于该月真实支出
+    const pageSize = 200;
+    let page = 1;
+    let total = 0;
+    const rows = [];
+    for (;;) {
+      const { data } = await api.get("/flows", {
+        params: {
+          category: names.join(','),
+          start: `${ym}-01`, end: `${ym}-31`,
+          page, pageSize, sortBy: "flow_time", order: "asc",
+        },
+      });
+      total = data.total;
+      rows.push(...(data.list || []));
+      if (!data.list?.length || rows.length >= total) break;
+      page += 1;
+    }
+    detailList.value = rows;
   } catch (e) {
     toast(e.message);
   } finally {
