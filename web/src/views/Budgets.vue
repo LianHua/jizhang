@@ -1,6 +1,5 @@
 <script setup>
 import { ref, onMounted, computed, watch } from "vue";
-import { useRoute } from "vue-router";
 import dayjs from "dayjs";
 import api from "../api.js";
 import { useStore } from "../store.js";
@@ -8,10 +7,22 @@ import { toast } from "../toast.js";
 import EChart from "../components/EChart.vue";
 
 const store = useStore();
-const route = useRoute();
 const year = ref(dayjs().year());
 const data = ref({ total: { amount: 0, spent: 0, remaining: 0, percent: 0 }, categories: [], spentByCategory: {} });
-const years = computed(() => [year.value - 2, year.value - 1, year.value, year.value + 1].filter((v, i, a) => a.indexOf(v) === i));
+// v260917：年份切换改成水电气同款「← 年份 →」，到底/到头箭头置灰。
+// years 仍保留（「复制预算」的来源年份下拉要用），改为固定区间，不再随所选年份滚动。
+const minYear = 2000; // 可回看/可复制的最早年份
+const maxYear = dayjs().year() + 1; // 允许提前给下一年做预算
+const years = computed(() => {
+  const out = [];
+  for (let y = minYear; y <= maxYear; y++) out.push(y);
+  return out;
+});
+function shiftYear(d) {
+  const next = year.value + d;
+  if (next < minYear || next > maxYear) return;
+  year.value = next;
+}
 
 const showDialog = ref(false);
 const mode = ref("cat"); // 'total' | 'cat'
@@ -25,8 +36,17 @@ async function load() {
   data.value = d;
 }
 onMounted(load);
+// v260917：年份用箭头切换（不再有 select 的 @change），统一用 watch 触发重载
+watch(year, load);
 
-const usedExpenseCats = computed(() => data.value.categories.map((c) => c.category));
+// 已设过预算的分类：多分类合并记录的 category 存的是 JSON 数组字符串
+// （如 '["餐饮","交通"]'），必须摊平成单个分类名再判重，否则这些分类不会置灰、
+// 能被重复添加（服务端 categories 数组里出现已设过的分类）。
+const usedExpenseCats = computed(() =>
+  data.value.categories.flatMap((c) =>
+    (c.categories && c.categories.length ? c.categories : [c.category])
+  )
+);
 const availableCats = computed(() => store.expenseCats);
 
 // 金额算式实时计算：支持 "1000+200" 这类简单四则，结果即时显示
@@ -113,8 +133,9 @@ async function moveCat(c, dir) {
   data.value.categories = [...list]; // 触发响应式
   try {
     // 全量提交整列 sort（保证与本地顺序一致，避免只传两条造成其他分类排序混乱）
+    // v260917：年份必须用当前所选年份；原先取 route.query.year，切年后调序会写到错的年份
     await api.post('/budgets/reorder', {
-      year: Number(route.query.year) || new Date().getFullYear(),
+      year: year.value,
       items: list.map((x) => ({ category: x.category, sort: x.sort })),
     });
     toast('已调序');
@@ -255,9 +276,12 @@ async function doCopy() {
     <div class="head-row">
       <h2 class="page-title" style="margin:0">预算管理</h2>
       <div class="row" style="gap:8px">
-        <select class="select" style="width:auto" v-model.number="year" @change="load">
-          <option v-for="y in years" :key="y" :value="y">{{ y }}年</option>
-        </select>
+        <!-- v260917：年份切换改成水电气同款「← 年份 →」，边界置灰 -->
+        <div class="year-nav">
+          <button class="btn btn-sm" :disabled="year <= minYear" @click="shiftYear(-1)">←</button>
+          <span class="year-txt">{{ year }} 年</span>
+          <button class="btn btn-sm" :disabled="year >= maxYear" @click="shiftYear(1)">→</button>
+        </div>
         <button class="btn btn-sm" @click="showCopy = true">复制预算</button>
       </div>
     </div>
@@ -410,7 +434,8 @@ async function doCopy() {
           <span>来源年份</span>
           <select class="select" v-model.number="copyFrom">
             <option :value="null" disabled>请选择…</option>
-            <option v-for="y in years.filter(y => y !== year)" :key="y" :value="y">{{ y }}年</option>
+            <!-- v260917：来源年份改成「近 → 远」倒序（年份列表已放宽到固定区间） -->
+            <option v-for="y in [...years].reverse().filter((y) => y !== year)" :key="y" :value="y">{{ y }}年</option>
           </select>
         </label>
         <div class="row" style="justify-content:flex-end">
@@ -424,6 +449,9 @@ async function doCopy() {
 
 <style scoped>
 .head-row { display: flex; align-items: center; justify-content: space-between; }
+/* v260917：与水电气页年份切换同款（← 年份 →，居中定宽） */
+.year-nav { display: inline-flex; align-items: center; gap: 8px; }
+.year-txt { font-weight: 700; font-size: 15px; min-width: 70px; text-align: center; }
 .cal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
 .total-nums { display: flex; gap: 24px; font-size: 15px; flex-wrap: wrap; }
 .cat-list { grid-template-columns: repeat(4, 1fr); }

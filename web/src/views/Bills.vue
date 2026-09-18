@@ -13,11 +13,24 @@ const loading = ref(false);
 const monthly = ref({ year: year.value, years: [], summary: { income: 0, expense: 0, balance: 0, count: 0 }, rows: [] });
 const yearly = ref({ summary: { income: 0, expense: 0, balance: 0, count: 0 }, rows: [] });
 
-// 年份下拉：有流水的年份 + 当前年（保证总能选到今年）
+// 有数据的年份 + 当前年（保证总能切到今年）
 const yearOptions = computed(() => {
   const s = new Set([...(monthly.value.years || []), dayjs().year()]);
   return [...s].sort((a, b) => b - a);
 });
+// v260917：年份切换改成水电气同款「← 年份 →」。
+// 下限 = 有数据的最早年份（更早的年份本来就没账单，不给切）；上限 = 当前年。
+const minYear = computed(() =>
+  yearOptions.value.length ? yearOptions.value[yearOptions.value.length - 1] : null
+);
+const maxYear = computed(() => dayjs().year());
+function shiftYear(d) {
+  const next = year.value + d;
+  if (minYear.value != null && next < minYear.value) return;
+  if (next > maxYear.value) return;
+  year.value = next;
+  loadMonthly();
+}
 
 async function loadMonthly() {
   loading.value = true;
@@ -200,9 +213,12 @@ const maxAbs = computed(() => Math.max(1, ...rows.value.map((r) => Math.abs(r.ba
           <button :class="['seg-btn', { on: tab === 'month' }]" @click="switchTab('month')">月账单</button>
           <button :class="['seg-btn', { on: tab === 'year' }]" @click="switchTab('year')">年账单</button>
         </div>
-        <select v-if="tab === 'month'" class="select" style="width:auto" v-model.number="year" @change="loadMonthly">
-          <option v-for="y in yearOptions" :key="y" :value="y">{{ y }}</option>
-        </select>
+        <!-- v260917：年份切换改成水电气同款「← 年份 →」，边界置灰 -->
+        <div v-if="tab === 'month'" class="year-nav">
+          <button class="btn btn-sm" :disabled="minYear != null && year <= minYear" @click="shiftYear(-1)">←</button>
+          <span class="year-txt">{{ year }} 年</span>
+          <button class="btn btn-sm" :disabled="year >= maxYear" @click="shiftYear(1)">→</button>
+        </div>
       </div>
     </div>
 
@@ -381,6 +397,9 @@ const maxAbs = computed(() => Math.max(1, ...rows.value.map((r) => Math.abs(r.ba
 
 <style scoped>
 .head-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+/* v260917：与水电气页年份切换同款（← 年份 →，居中定宽） */
+.year-nav { display: inline-flex; align-items: center; gap: 8px; }
+.year-txt { font-weight: 700; font-size: 15px; min-width: 70px; text-align: center; }
 .seg { display: inline-flex; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 3px; }
 .seg-btn { border: 0; background: transparent; color: var(--text-2); padding: 7px 16px; font-size: 14px; border-radius: 8px; cursor: pointer; }
 .seg-btn.on { background: var(--surface); color: var(--primary); font-weight: 600; box-shadow: var(--shadow); }

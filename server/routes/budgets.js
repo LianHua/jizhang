@@ -108,14 +108,18 @@ r.post(
     if (!(amount >= 0)) return res.status(400).json({ error: "金额不合法" });
     // 原始算式保留（如 "1000+200"），方便下次修改时回填
     const expression = (req.body?.expression || "").toString().trim();
-    const cats = req.body?.categories && Array.isArray(req.body.categories)
+    // 传了 categories 数组 = 分类预算（必须选到分类）；
+    // 只传 category（可为空串）= 单分类 或「年度总预算」——空串是年度总预算的存储约定
+    // （GET / 里 total = category==''），不能再被当成「未选分类」而拒掉。
+    const isCatMode = Array.isArray(req.body?.categories);
+    const cats = isCatMode
       ? req.body.categories.map((c) => (c || "").trim()).filter(Boolean)
       : [(req.body?.category || "").trim()];
+    if (isCatMode && !cats.length) return res.status(400).json({ error: "请选择分类" });
 
     // 多分类合并为一条预算：category 存 JSON 数组字符串（如 '["餐饮","交通"]'），
     // 金额 = 这几个分类共享的总预算；单分类保持原样（category 存分类名）
     const storeCat = cats.length > 1 ? JSON.stringify(cats) : (cats[0] || "");
-    if (!storeCat) return res.status(400).json({ error: "请选择分类" });
 
     // 已存在的 sort 保留；新记录用当前已有条数 * 10 当初始 sort
     const cur = db.prepare("SELECT COALESCE(sort, 0) AS sort FROM budgets WHERE book_id=? AND year=? AND category=?").get(req.bookId, year, storeCat);
@@ -163,14 +167,25 @@ r.post(
     const toYear = Number(req.body?.toYear) || new Date().getFullYear();
     if (!fromYear) return res.status(400).json({ error: "请选择来源年份" });
     const rows = db
-      .prepare("SELECT category, amount, expression FROM budgets WHERE book_id=? AND year=?")
+      .prepare(
+        `SELECT category, amount, expression, COALESCE(sort, 0) AS sort FROM budgets
+         WHERE book_id=? AND year=? ORDER BY COALESCE(sort, 0), category`
+      )
       .all(req.bookId, fromYear);
     const stmt = db.prepare(
       `INSERT INTO budgets (book_id, year, category, amount, expression, sort) VALUES (?,?,?,?,?,?)
        ON CONFLICT(book_id, year, category) DO UPDATE SET amount=excluded.amount, expression=excluded.expression, sort=COALESCE(excluded.sort, sort)`
     );
     const tx = db.transaction(() => {
-      for (const r of rows) stmt.run(req.bookId, toYear, r.category, r.amount, r.expression || "");
+      let i = 0;
+      for (const r of rows) {
+        i += 1;
+        // ⚠️ VALUES 有 6 个占位符，必须传 6 个值（漏 sort 会直接抛
+        // 「Too few parameter values were provided」→ 整条复制接口 500）
+        // 源年份没排过序（sort=0）时按拷贝顺序补一个，避免复制后分类顺序随机
+        const sort = r.sort > 0 ? r.sort : i * 10;
+        stmt.run(req.bookId, toYear, r.category, r.amount, r.expression || "", sort);
+      }
     });
     tx();
     res.json({ ok: true, copied: rows.length });
