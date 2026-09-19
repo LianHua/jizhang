@@ -19,6 +19,7 @@ import billRoutes from "./routes/bills.js";
 import savingsRoutes from "./routes/savings.js";
 import walletRoutes from "./routes/wallets.js";
 import syncRoutes from "./routes/sync.js";
+import logRoutes from "./routes/logs.js";
 import merchantRoutes from "./routes/merchants.js";
 import utilityRoutes, { migrateUtilityAlignV1, migrateUtilityAlignV2, migrateUtilityAlignV3 } from "./routes/utility.js";
 import { logOp } from "./oplog.js";
@@ -152,6 +153,8 @@ app.use("/api/bills", billRoutes);
 app.use("/api/savings", savingsRoutes);
 app.use("/api/wallets", walletRoutes);
 app.use("/api/sync", syncRoutes);
+// 客户端自动记账运行日志（安卓端上传，服务端不限条数留存，排查漏记用）
+app.use("/api/logs", logRoutes);
 app.use("/api/merchants", merchantRoutes);
 app.use("/api/utility", utilityRoutes);
 app.use("/api/oplogs", oplogRoutes);

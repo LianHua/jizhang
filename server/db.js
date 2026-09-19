@@ -329,6 +329,31 @@ db.exec(
   "CREATE INDEX IF NOT EXISTS idx_oplogs_book ON op_logs(book_id, id DESC)"
 );
 
+// 客户端（安卓）自动记账运行日志：设备把本地日志（含通知通道/无障碍通道的判定过程）
+// 同步上来，服务端**不限条数**长期留存 —— 便于事后排查「某笔支付为什么没自动记账」。
+// 幂等：同一 (book_id, device, ts, line) 唯一 → 客户端整包重传不会产生重复行
+// （因此客户端上传逻辑可以很简单：把本地缓冲全量发一次，成功即可）。
+// ⚠️ 以后给本表加列，addColumnIfMissing 必须写在这段 CREATE TABLE 之后。
+db.exec(`
+CREATE TABLE IF NOT EXISTS client_logs (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id     INTEGER NOT NULL DEFAULT 0,   -- 上传时所在账本（家人各自的账本能区分）
+  user_id     INTEGER NOT NULL DEFAULT 0,   -- 上传账号
+  device      TEXT NOT NULL DEFAULT '',     -- 设备标识（客户端生成并持久化）
+  platform    TEXT NOT NULL DEFAULT 'android',
+  app_version TEXT NOT NULL DEFAULT '',
+  ts          TEXT NOT NULL DEFAULT '',     -- 日志行自带的时间戳 YYYY-MM-DD HH:mm:ss
+  line        TEXT NOT NULL,                -- 原始日志行（含 [时间] 前缀）
+  created_at  TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+)`);
+db.exec(
+  "CREATE UNIQUE INDEX IF NOT EXISTS idx_client_logs_uniq ON client_logs(book_id, device, ts, line)"
+);
+db.exec(
+  "CREATE INDEX IF NOT EXISTS idx_client_logs_book ON client_logs(book_id, id DESC)"
+);
+db.exec("CREATE INDEX IF NOT EXISTS idx_client_logs_device ON client_logs(device, id DESC)");
+
 // 常用名称建议（未收藏 ×N）物化表：流水保存后 / 每日自动扫描时重建，
 // 页面读取直接查表，避免每次实时聚合（每账本每名称一行，占用极小）
 db.exec(`

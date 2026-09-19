@@ -12,6 +12,9 @@ const PATH_RE = /^\/([a-z_]+)\/?(\d+)?/;
 export function logOp(req, res, next) {
   const m = req.method;
   if (m !== "POST" && m !== "PUT" && m !== "DELETE") return next();
+  // 客户端日志上报（POST /logs/client）是高频心跳型请求，不属于「用户操作」，
+  // 不入审计表（否则 op_logs 会被日志上传刷屏，真正的人工操作反而被淹没）。
+  if ((req.path || "").startsWith("/logs/client")) return next();
   res.on("finish", () => {
     try {
       if (!req.user) return; // 只记已登录用户的写操作

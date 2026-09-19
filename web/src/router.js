@@ -12,6 +12,7 @@ const routes = [
       { path: "stats", name: "stats", component: () => import("./views/Stats.vue") },
       { path: "budgets", name: "budgets", component: () => import("./views/Budgets.vue") },
       { path: "ai", name: "ai", component: () => import("./views/AiView.vue") },
+      { path: "autologs", name: "autologs", component: () => import("./views/AutoRecordLogs.vue") },
       { path: "import", name: "import", component: () => import("./views/ImportView.vue") },
       { path: "trash", name: "trash", component: () => import("./views/Trash.vue") },
       { path: "books", name: "books", component: () => import("./views/Books.vue") },

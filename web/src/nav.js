@@ -15,6 +15,7 @@ export const ALL_NAV = [
   { name: "stats", label: "统计", icon: "📊" },
   { name: "budgets", label: "预算", icon: "🎯" },
   { name: "ai", label: "AI记账", icon: "✨" },
+  { name: "autologs", label: "记账日志", icon: "📜" },
   { name: "import", label: "导入", icon: "📥" },
   { name: "trash", label: "回收站", icon: "🗑️" },
   { name: "books", label: "账本", icon: "📚" },
