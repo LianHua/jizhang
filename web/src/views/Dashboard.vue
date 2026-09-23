@@ -159,7 +159,9 @@ function catIcon(name) {
         <div class="ficon">{{ catIcon(f.category) }}</div>
         <div class="fmain">
           <div class="fcat">
-            <span v-if="f.source === 'ai'" class="ai-tag" title="AI 记账">AI</span>
+            <!-- source：'ai' = AI 识别记账，'auto' = 通知/无障碍自动记账，两者都打 AI 标签 -->
+            <span v-if="f.source === 'ai' || f.source === 'auto'" class="ai-tag"
+                  :title="f.source === 'auto' ? '自动记账' : 'AI 记账'">AI</span>
             {{ f.category }}<span v-if="f.description" class="muted"> · {{ f.description }}</span>
           </div>
           <div class="muted ftime">{{ dayjs(f.flow_time).format("MM-DD") }} · {{ f.attribution || "—" }}</div>

@@ -210,7 +210,9 @@ function ownerBg(c) {
               <div class="sf-top">
                 <span class="sf-name">{{ f.description || f.category }}</span>
                 <span class="sf-meta">
-                  <span v-if="f.source === 'ai'" class="ai-tag" title="AI 记账">AI</span>
+                  <!-- source：'ai' = AI 识别记账，'auto' = 通知/无障碍自动记账，两者都打 AI 标签 -->
+                  <span v-if="f.source === 'ai' || f.source === 'auto'" class="ai-tag"
+                        :title="f.source === 'auto' ? '自动记账' : 'AI 记账'">AI</span>
                   <span class="sf-amt" :class="f.type">{{ (f.type === 'expense' ? '-' : '+') + Number(f.amount).toFixed(2) }}</span>
                 </span>
               </div>

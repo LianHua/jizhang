@@ -332,7 +332,9 @@ function freqText(t) {
           <tr v-for="f in data.list" :key="f.id">
             <td><span class="ic">{{ catIcon(f.category) }}</span>{{ f.category }}</td>
             <td class="hide-mobile muted">
-              <span v-if="f.source === 'ai'" class="ai-tag" title="AI 记账">AI</span>
+              <!-- source：'ai' = AI 识别记账，'auto' = 通知/无障碍自动记账，两者都打 AI 标签 -->
+              <span v-if="f.source === 'ai' || f.source === 'auto'" class="ai-tag"
+                    :title="f.source === 'auto' ? '自动记账' : 'AI 记账'">AI</span>
               {{ f.description || f.category }}
             </td>
             <td class="hide-mobile muted">{{ dayjs(f.flow_time).format("YYYY-MM-DD") }}</td>
