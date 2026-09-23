@@ -27,28 +27,52 @@ jobs:
   # `docker compose up -d` 的场景。任何「空库启动即崩」的问题
   # （如 v2.2.19 的 flows.source 列顺序 bug）都会在这里被拦住，
   # 不让坏镜像推到 Docker Hub。
+  #
+  # amd64 与 arm64 两个架构都冒烟（2026-09-23 补齐 arm64）：
+  # arm64 在 QEMU 模拟下真实起容器，并在容器内断言
+  # `node -p process.arch` == arm64、better-sqlite3 原生模块可加载，
+  # 确保「多架构镜像」不只是构建出来，而是真能在 ARM 上跑起来。
+  # ⚠️ arm64 走模拟执行，health 等待次数给得更大（150 × 2s）。
   # ---------------------------------------------------------------
   smoke:
-    name: 全新部署冒烟（空数据卷）
+    name: 全新部署冒烟（${{ matrix.arch }} · 空数据卷）
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            node_arch: x64
+            health_iters: 60
+            cache_scope: smoke-amd64
+          - platform: linux/arm64
+            arch: arm64
+            node_arch: arm64
+            health_iters: 150
+            cache_scope: smoke-arm64
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up QEMU（arm64 需模拟执行）
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: 构建 amd64 测试镜像（不推送）
+      - name: 构建 ${{ matrix.arch }} 测试镜像（不推送）
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           load: true
           push: false
           tags: jizhang:fresh-smoke
           build-args: |
             APP_VERSION=smoke
-          cache-from: type=gha
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}
 
       - name: 空数据卷启动 → 健康检查 → 写入 → 重启，全程断言
         run: |
@@ -58,7 +82,7 @@ jobs:
           docker volume create jz-smoke-data >/dev/null
 
           # 全新空卷 = 首次部署
-          docker run -d --name jz-smoke -p 9611:9600 \
+          docker run -d --name jz-smoke --platform ${{ matrix.platform }} -p 9611:9600 \
             -e JWT_SECRET=smoke-secret \
             -e ADMIN_USERNAME=admin \
             -e ADMIN_PASSWORD=admin123 \
@@ -66,7 +90,7 @@ jobs:
             jizhang:fresh-smoke
 
           wait_health() {
-            for i in $(seq 1 60); do
+            for i in $(seq 1 ${{ matrix.health_iters }}); do
               if curl -sf http://127.0.0.1:9611/api/health >/dev/null 2>&1; then return 0; fi
               if [ "$(docker inspect -f '{{.State.Running}}' jz-smoke 2>/dev/null)" != "true" ]; then
                 echo "❌ 容器已退出（无限重启）"; docker logs jz-smoke; return 1
@@ -79,6 +103,17 @@ jobs:
           echo "=== 首次启动 ==="
           wait_health
           docker logs jz-smoke
+
+          echo "=== 架构校验（期望 ${{ matrix.node_arch }}）==="
+          ARCH=$(docker exec jz-smoke node -p "process.arch")
+          echo "容器内 node process.arch = $ARCH"
+          if [ "$ARCH" != "${{ matrix.node_arch }}" ]; then
+            echo "❌ 架构不符：期望 ${{ matrix.node_arch }}，实际 $ARCH"
+            exit 1
+          fi
+          # 唯一的原生模块 better-sqlite3 必须在本架构下真能加载并读写
+          docker exec jz-smoke node -e "const D=require('/app/node_modules/better-sqlite3');const db=new D(':memory:');db.exec('create table t(a)');db.prepare('insert into t values(1)').run();console.log('better-sqlite3 原生模块 OK, rows =',db.prepare('select count(*) c from t').get().c)"
+          echo "✅ ${{ matrix.arch }} 架构与原生模块校验通过"
 
           # 版本号必须来自镜像内 /app/VERSION
           curl -sf http://127.0.0.1:9611/api/meta; echo
